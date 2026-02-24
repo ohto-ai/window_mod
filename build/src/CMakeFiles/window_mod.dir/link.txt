@@ -1,1 +1,0 @@
-/usr/bin/x86_64-w64-mingw32-g++ CMakeFiles/window_mod.dir/main.cpp.o CMakeFiles/window_mod.dir/window_list.cpp.o CMakeFiles/window_mod.dir/window_ops.cpp.o CMakeFiles/window_mod.dir/injector.cpp.o CMakeFiles/window_mod.dir/window_mod.rc.res -o window_mod  -luser32 -lgdi32 -lpsapi -lcomctl32 -lshell32 -ldwmapi

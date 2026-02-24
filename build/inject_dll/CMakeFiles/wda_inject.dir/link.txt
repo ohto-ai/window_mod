@@ -1,1 +1,0 @@
-/usr/bin/x86_64-w64-mingw32-g++ -fPIC -shared -Wl,-soname,wda_inject.so -o wda_inject.so CMakeFiles/wda_inject.dir/dllmain.cpp.o  -luser32

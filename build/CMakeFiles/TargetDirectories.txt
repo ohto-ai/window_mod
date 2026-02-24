@@ -1,8 +1,0 @@
-/home/runner/work/window_mod/window_mod/build/CMakeFiles/edit_cache.dir
-/home/runner/work/window_mod/window_mod/build/CMakeFiles/rebuild_cache.dir
-/home/runner/work/window_mod/window_mod/build/src/CMakeFiles/window_mod.dir
-/home/runner/work/window_mod/window_mod/build/src/CMakeFiles/edit_cache.dir
-/home/runner/work/window_mod/window_mod/build/src/CMakeFiles/rebuild_cache.dir
-/home/runner/work/window_mod/window_mod/build/inject_dll/CMakeFiles/wda_inject.dir
-/home/runner/work/window_mod/window_mod/build/inject_dll/CMakeFiles/edit_cache.dir
-/home/runner/work/window_mod/window_mod/build/inject_dll/CMakeFiles/rebuild_cache.dir
