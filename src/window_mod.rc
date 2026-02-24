@@ -21,10 +21,7 @@ BEGIN
     // ---- Operations --------------------------------------------------------
     GROUPBOX        "Window Operations", IDC_GRP_OPS, 7, 153, 406, 36
 
-    PUSHBUTTON      "Set TopMost",      IDC_BTN_TOPMOST,    14,  166, 74, 14
-    PUSHBUTTON      "Remove TopMost",   IDC_BTN_NO_TOPMOST, 94,  166, 80, 14
-    PUSHBUTTON      "Hide Window",      IDC_BTN_HIDE,       180, 166, 70, 14
-    PUSHBUTTON      "Exclude Capture",  IDC_BTN_WDA,        256, 166, 150, 14
+    PUSHBUTTON      "Hide Window",       IDC_BTN_HIDE, 14, 166, 96, 14
 
     // ---- Hidden windows list -----------------------------------------------
     LTEXT           "Hidden Windows:", IDC_GRP_HIDDEN, 7, 195, 80, 8

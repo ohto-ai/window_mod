@@ -367,13 +367,7 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
         MoveWindow(hGrp, mX, opsY, W - 2*mX, opsH, FALSE);
     {
         const int bx = mX + 8, by = opsY + 18;
-        const int bw0 = 100, bw1 = 118, bw2 = 96;
-        const int bw3 = W - 2*mX - 8 - bw0 - 4 - bw1 - 4 - bw2 - 4 - 8;
-        Move(IDC_BTN_TOPMOST,    bx,                         by, bw0, btnH);
-        Move(IDC_BTN_NO_TOPMOST, bx + bw0 + 4,               by, bw1, btnH);
-        Move(IDC_BTN_HIDE,       bx + bw0+4 + bw1+4,         by, bw2, btnH);
-        Move(IDC_BTN_WDA,        bx + bw0+4 + bw1+4 + bw2+4, by,
-             (bw3 > 80 ? bw3 : 80), btnH);
+        Move(IDC_BTN_HIDE, bx, by, 96, btnH);
     }
 
     // Hidden windows section – "Show Selected" button only (no "Remove from List")
@@ -561,42 +555,6 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         switch (id)
         {
-        case IDC_BTN_TOPMOST:
-        {
-            const WindowInfo* w = GetSelectedWindow(hDlg);
-            if (!w) { SetStatus(hDlg, L"No window selected."); break; }
-            if (SetWindowTopMost(w->hwnd, true)) {
-                SetStatus(hDlg, L"Set TOPMOST: \"" + w->title + L"\"");
-                HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-                int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-                if (sel >= 0)
-                    ListView_SetItemText(hList, sel, 4,
-                        const_cast<LPWSTR>(L"\u2713"));
-            } else {
-                SetStatus(hDlg, L"Failed to set TOPMOST (error "
-                    + std::to_wstring(GetLastError()) + L")");
-            }
-            break;
-        }
-
-        case IDC_BTN_NO_TOPMOST:
-        {
-            const WindowInfo* w = GetSelectedWindow(hDlg);
-            if (!w) { SetStatus(hDlg, L"No window selected."); break; }
-            if (SetWindowTopMost(w->hwnd, false)) {
-                SetStatus(hDlg, L"Removed TOPMOST: \"" + w->title + L"\"");
-                HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-                int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-                if (sel >= 0)
-                    ListView_SetItemText(hList, sel, 4,
-                        const_cast<LPWSTR>(L""));
-            } else {
-                SetStatus(hDlg, L"Failed to remove TOPMOST (error "
-                    + std::to_wstring(GetLastError()) + L")");
-            }
-            break;
-        }
-
         case IDC_BTN_HIDE:
         {
             const WindowInfo* w = GetSelectedWindow(hDlg);
@@ -619,30 +577,6 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 SetStatus(hDlg, L"Failed to hide window.");
             }
         done_hide:;
-            break;
-        }
-
-        case IDC_BTN_WDA:
-        {
-            const WindowInfo* w = GetSelectedWindow(hDlg);
-            if (!w) { SetStatus(hDlg, L"No window selected."); break; }
-            SetStatus(hDlg, L"Injecting DLL into \""
-                + w->title + L"\" \u2026");
-            if (InjectWDAExcludeFromCapture(w->hwnd)) {
-                SetStatus(hDlg, L"WDA_EXCLUDEFROMCAPTURE applied to \""
-                    + w->title + L"\"");
-                HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-                int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-                if (sel >= 0)
-                    ListView_SetItemText(hList, sel, 5,
-                        const_cast<LPWSTR>(L"\u2713"));
-            } else {
-                SetStatus(hDlg,
-                    L"Injection failed (error "
-                    + std::to_wstring(GetLastError())
-                    + L"). Run as Administrator and ensure "
-                      L"wda_inject.dll is beside the exe.");
-            }
             break;
         }
 
