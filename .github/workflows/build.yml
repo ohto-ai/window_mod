@@ -1,0 +1,48 @@
+name: Build
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (MSVC ${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+        include:
+          - arch: x64
+            cmake_arch: x64
+          - arch: x86
+            cmake_arch: Win32
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -A ${{ matrix.cmake_arch }}
+
+      - name: Build (Release)
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item build\src\Release\window_mod.exe dist\
+          Copy-Item build\src\Release\wda_inject.dll  dist\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: window_mod-${{ matrix.arch }}
+          path: dist\
+          if-no-files-found: error

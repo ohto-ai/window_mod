@@ -1,0 +1,45 @@
+// window_mod.rc  –  Dialog resource for Window Modifier
+#include <winresrc.h>
+#include "resource.h"
+
+IDD_MAIN_DIALOG DIALOGEX 0, 0, 420, 310
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME
+CAPTION "Window Modifier"
+FONT 9, "Segoe UI"
+BEGIN
+    // ---- Window list -------------------------------------------------------
+    LTEXT           "Windows:", -1, 7, 7, 40, 8
+
+    CONTROL         "", IDC_WINDOW_LIST, "SysListView32",
+                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+                    WS_BORDER | WS_TABSTOP,
+                    7, 18, 340, 120
+
+    PUSHBUTTON      "Refresh",      IDC_BTN_REFRESH, 354, 18,  60, 14
+    PUSHBUTTON      "Pick Window",  IDC_BTN_PICK,    354, 36,  60, 14
+
+    // ---- Selected window info ----------------------------------------------
+    LTEXT           "", IDC_SELECTED_INFO, 7, 142, 406, 8
+
+    // ---- Operations --------------------------------------------------------
+    GROUPBOX        "Window Operations", IDC_GRP_OPS, 7, 153, 406, 36
+
+    PUSHBUTTON      "Set TopMost",      IDC_BTN_TOPMOST,    14,  166, 74, 14
+    PUSHBUTTON      "Remove TopMost",   IDC_BTN_NO_TOPMOST, 94,  166, 80, 14
+    PUSHBUTTON      "Hide Window",      IDC_BTN_HIDE,       180, 166, 70, 14
+    PUSHBUTTON      "Exclude Capture",  IDC_BTN_WDA,        256, 166, 150, 14
+
+    // ---- Hidden windows list -----------------------------------------------
+    LTEXT           "Hidden Windows:", IDC_GRP_HIDDEN, 7, 195, 80, 8
+
+    CONTROL         "", IDC_HIDDEN_LIST, "SysListView32",
+                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+                    WS_BORDER | WS_TABSTOP,
+                    7, 206, 406, 72
+
+    PUSHBUTTON      "Show Selected",   IDC_BTN_SHOW,         7,  282, 72, 14
+    PUSHBUTTON      "Remove from List",IDC_BTN_REMOVE_HIDDEN,86, 282, 80, 14
+
+    // ---- Status bar --------------------------------------------------------
+    LTEXT           "Ready", IDC_STATUS_TEXT, 7, 298, 406, 8
+END
