@@ -2,11 +2,10 @@
  * dllmain.cpp  –  wda_inject.dll
  *
  * This DLL is injected into a target process by window_mod.exe.
- * On DLL_PROCESS_ATTACH it reads the target HWND from a named shared-memory
- * object (written by the injector before injection), then calls
- *   SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
- * from within the target process (the only process that is allowed to make
- * this call for its own windows).
+ * On DLL_PROCESS_ATTACH it reads the target HWND and desired affinity from a
+ * named shared-memory object (written by the injector before injection), then
+ * calls SetWindowDisplayAffinity(hwnd, affinity) from within the target process
+ * (the only process that is allowed to make this call for its own windows).
  *
  * Requires Windows 10 version 2004 (build 19041) or later for
  * WDA_EXCLUDEFROMCAPTURE.
@@ -17,9 +16,18 @@
 // Same name as in src/injector.cpp
 #define WDA_SHARED_MEM_NAME  L"Local\\WdaInjectHwnd_WindowMod"
 
+#ifndef WDA_NONE
+#define WDA_NONE 0x00000000
+#endif
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
+
+// Layout of the shared-memory block (must match src/injector.cpp).
+struct WdaSharedData {
+    HWND  hwnd;
+    DWORD affinity;
+};
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReason, LPVOID /*lpReserved*/)
 {
@@ -33,18 +41,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReason, LPVOID /*lpReserved*/)
     if (!hMap)
         return TRUE; // nothing we can do; return TRUE so the DLL loads
 
-    const void* pView = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, sizeof(HWND));
+    const void* pView = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, sizeof(WdaSharedData));
     if (!pView) {
         CloseHandle(hMap);
         return TRUE;
     }
 
-    HWND hwnd = *reinterpret_cast<const HWND*>(pView);
+    const auto* pData = reinterpret_cast<const WdaSharedData*>(pView);
+    HWND  hwnd     = pData->hwnd;
+    DWORD affinity = pData->affinity;
     UnmapViewOfFile(pView);
     CloseHandle(hMap);
 
     if (hwnd && IsWindow(hwnd))
-        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        SetWindowDisplayAffinity(hwnd, affinity);
 
     return TRUE;
 }

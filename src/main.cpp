@@ -3,13 +3,16 @@
  *
  * Features:
  *  - Enumerate visible windows (title + process name)
- *  - "Pick" cursor: click a live window to select it
- *  - Set / remove TOPMOST
- *  - Hide (track in a separate list for recovery)
- *  - Inject wda_inject.dll to set WDA_EXCLUDEFROMCAPTURE
+ *  - Auto-refresh list when focused; show ":)" placeholder when unfocused
+ *  - TopMost and ExcludeCapture columns with inline click-to-toggle support
+ *  - Hide windows (tracked in a separate list for recovery)
+ *  - Inject wda_inject.dll to set/clear WDA_EXCLUDEFROMCAPTURE
+ *  - System tray icon: close button hides to tray; exit only via tray menu
+ *  - Restore all hidden windows when exiting
  */
 
 #include <windows.h>
+#include <shellapi.h>
 #include <commctrl.h>
 #include <string>
 #include <vector>
@@ -22,21 +25,20 @@
 #include "injector.h"
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // ============================================================================
 // State
 // ============================================================================
 static HINSTANCE g_hInst       = nullptr;
-static HWND      g_hDlg         = nullptr;
+static HWND      g_hDlg        = nullptr;
 
 static std::vector<WindowInfo> g_windows;       // current window snapshot
 static std::vector<WindowInfo> g_hiddenWindows; // windows we've hidden
 
-static bool g_picking          = false;         // picker mode active
-static HWND g_lastHighlighted  = nullptr;       // window with highlight drawn
-
-static HCURSOR g_hCross        = nullptr;
-static HCURSOR g_hArrow        = nullptr;
+// Tray icon
+static NOTIFYICONDATA g_nid       = {};
+static bool           g_trayAdded = false;
 
 // ============================================================================
 // Forward declarations
@@ -78,7 +80,7 @@ static std::wstring FmtHandle(HWND hwnd)
 }
 
 // ---------------------------------------------------------------------------
-// ListView column setup
+// ListView column setup for the hidden-windows list (4 columns).
 
 static void InitListViewColumns(HWND hList)
 {
@@ -99,13 +101,44 @@ static void InitListViewColumns(HWND hList)
 }
 
 // ---------------------------------------------------------------------------
-// Populate (or refresh) the main window list.
+// ListView column setup for the main window list (6 columns: +TopMost +Excl.Cap).
 
-static void PopulateWindowList(HWND hDlg)
+static void InitMainListViewColumns(HWND hList)
+{
+    InitListViewColumns(hList);
+
+    static const struct { const wchar_t* name; int cx; int idx; } extra[] = {
+        { L"TopMost",  60, 4 },
+        { L"Excl.Cap", 60, 5 },
+    };
+    LVCOLUMNW lvc = {};
+    lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+    for (auto& c : extra) {
+        lvc.cx       = c.cx;
+        lvc.pszText  = const_cast<LPWSTR>(c.name);
+        lvc.iSubItem = c.idx;
+        ListView_InsertColumn(hList, c.idx, &lvc);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Populate (or refresh) the main window list.
+// If preserveSelection is true the currently-selected HWND is re-selected after
+// the refresh (used for timer-driven updates).
+
+static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 {
     HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-    ListView_DeleteAllItems(hList);
 
+    // Remember selected HWND before clearing
+    HWND selHwnd = nullptr;
+    if (preserveSelection) {
+        int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+        if (sel >= 0 && sel < static_cast<int>(g_windows.size()))
+            selHwnd = g_windows[sel].hwnd;
+    }
+
+    ListView_DeleteAllItems(hList);
     g_windows = EnumerateWindows(hDlg); // skip our own dialog
 
     LVITEMW lvi = {};
@@ -130,10 +163,52 @@ static void PopulateWindowList(HWND hDlg)
         auto hndStr = FmtHandle(w.hwnd);
         ListView_SetItemText(hList, i, 3,
             const_cast<LPWSTR>(hndStr.c_str()));
+
+        // TopMost column (click to toggle)
+        ListView_SetItemText(hList, i, 4,
+            const_cast<LPWSTR>(IsWindowTopMost(w.hwnd) ? L"\u2713" : L""));
+
+        // ExcludeCapture column (click to toggle via injection)
+        ListView_SetItemText(hList, i, 5,
+            const_cast<LPWSTR>(IsWindowExcludeFromCapture(w.hwnd) ? L"\u2713" : L""));
     }
-    SetStatus(hDlg,
-        std::wstring(L"Refreshed – ") + std::to_wstring(g_windows.size())
-        + L" windows found.");
+
+    // Restore selection
+    if (selHwnd) {
+        for (int i = 0; i < static_cast<int>(g_windows.size()); ++i) {
+            if (g_windows[i].hwnd == selHwnd) {
+                ListView_SetItemState(hList, i,
+                    LVIS_SELECTED | LVIS_FOCUSED,
+                    LVIS_SELECTED | LVIS_FOCUSED);
+                ListView_EnsureVisible(hList, i, FALSE);
+                break;
+            }
+        }
+    }
+
+    if (!preserveSelection) {
+        SetStatus(hDlg,
+            std::wstring(L"Refreshed \u2013 ") + std::to_wstring(g_windows.size())
+            + L" windows found.");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Show a ":)" placeholder in the window list when the app loses focus.
+
+static void ShowPlaceholder(HWND hDlg)
+{
+    HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
+    ListView_DeleteAllItems(hList);
+    g_windows.clear();
+
+    LVITEMW lvi = {};
+    lvi.mask    = LVIF_TEXT;
+    lvi.iItem   = 0;
+    lvi.pszText = const_cast<LPWSTR>(L":)");
+    ListView_InsertItem(hList, &lvi);
+
+    SetDlgItemTextW(hDlg, IDC_SELECTED_INFO, L"Selected: (none)");
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +245,18 @@ static void PopulateHiddenList(HWND hDlg)
 }
 
 // ---------------------------------------------------------------------------
+// Restore every window currently in the hidden list (called on exit).
+
+static void RestoreAllHiddenWindows()
+{
+    for (auto& w : g_hiddenWindows) {
+        if (IsWindow(w.hwnd))
+            ShowWindowRestore(w.hwnd);
+    }
+    g_hiddenWindows.clear();
+}
+
+// ---------------------------------------------------------------------------
 // Return the WindowInfo for the currently selected row (main list),
 // or nullptr if nothing is selected.
 
@@ -180,31 +267,6 @@ static const WindowInfo* GetSelectedWindow(HWND hDlg)
     if (sel < 0 || sel >= static_cast<int>(g_windows.size()))
         return nullptr;
     return &g_windows[sel];
-}
-
-// ---------------------------------------------------------------------------
-// Select a window in the list by HWND (after pick).
-
-static void SelectByHwnd(HWND hDlg, HWND target)
-{
-    HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-    for (int i = 0; i < static_cast<int>(g_windows.size()); ++i) {
-        if (g_windows[i].hwnd == target) {
-            ListView_SetItemState(hList, i,
-                LVIS_SELECTED | LVIS_FOCUSED,
-                LVIS_SELECTED | LVIS_FOCUSED);
-            ListView_EnsureVisible(hList, i, FALSE);
-            return;
-        }
-    }
-    // Not in list yet – add it on the fly.
-    DWORD pid = 0;
-    GetWindowThreadProcessId(target, &pid);
-    wchar_t title[256] = {};
-    GetWindowTextW(target, title, 256);
-    g_windows.push_back({ target, title, GetProcessName(pid), pid });
-    PopulateWindowList(hDlg);
-    SelectByHwnd(hDlg, target);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,69 +286,29 @@ static void UpdateSelectedInfo(HWND hDlg)
 }
 
 // ============================================================================
-// Window highlight drawing (used during pick mode)
+// Tray icon management
 // ============================================================================
 
-static void DrawHighlight(HWND hwnd)
+static void CreateTrayIcon(HWND hDlg)
 {
-    if (!hwnd || !IsWindow(hwnd))
-        return;
-
-    RECT rc;
-    if (!GetWindowRect(hwnd, &rc))
-        return;
-
-    HDC hdc = GetDC(nullptr); // screen DC
-    if (!hdc) return;
-
-    const int border = 3;
-    // Draw four edge rectangles in INVERT mode (XOR – calling twice restores).
-    RECT edges[4] = {
-        { rc.left,          rc.top,            rc.right,          rc.top  + border },
-        { rc.left,          rc.bottom - border, rc.right,          rc.bottom        },
-        { rc.left,          rc.top,            rc.left  + border, rc.bottom        },
-        { rc.right - border,rc.top,            rc.right,          rc.bottom        },
-    };
-    for (auto& e : edges)
-        InvertRect(hdc, &e);
-
-    ReleaseDC(nullptr, hdc);
+    HICON hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    g_nid        = {};
+    g_nid.cbSize = sizeof(g_nid);
+    g_nid.hWnd   = hDlg;
+    g_nid.uID    = 1;
+    g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon  = hIcon;
+    wcscpy_s(g_nid.szTip, L"Window Modifier");
+    g_trayAdded = (Shell_NotifyIconW(NIM_ADD, &g_nid) != FALSE);
 }
 
-static void EraseHighlight(HWND hwnd)
+static void DestroyTrayIcon()
 {
-    // InvertRect is its own inverse; calling it again restores the pixels.
-    DrawHighlight(hwnd);
-}
-
-// ============================================================================
-// Picker logic
-// ============================================================================
-
-static void StartPicking(HWND hDlg)
-{
-    g_picking         = true;
-    g_lastHighlighted = nullptr;
-    SetCapture(hDlg);
-    SetCursor(g_hCross);
-    SetDlgItemTextW(hDlg, IDC_BTN_PICK, L"Cancel Pick");
-    SetStatus(hDlg, L"Pick mode: move mouse over a window and click to select.  "
-                    L"Press Escape or right-click to cancel.");
-}
-
-static void StopPicking(HWND hDlg, bool cancelled)
-{
-    if (!g_picking) return;
-    g_picking = false;
-
-    if (g_lastHighlighted) {
-        EraseHighlight(g_lastHighlighted);
-        g_lastHighlighted = nullptr;
+    if (g_trayAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        g_trayAdded = false;
     }
-    ReleaseCapture();
-    SetCursor(g_hArrow);
-    SetDlgItemTextW(hDlg, IDC_BTN_PICK, L"Pick Window");
-    SetStatus(hDlg, cancelled ? L"Pick cancelled." : L"Window picked.");
 }
 
 // ============================================================================
@@ -307,7 +329,6 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     const int DY      = 5;    // small vertical gap
     const int btnH    = 24;   // button height
     const int lblH    = 14;   // label height
-    const int sideBtnW = 95;  // Refresh / Pick button width
 
     // Bottom-anchored zone heights
     const int statusH  = 16;
@@ -320,15 +341,14 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     const int hidListY = hidBtnY - DY - hidListH;
     const int hidLblY  = hidListY - DY - lblH;
 
-    const int opsH     = 44;  // Operations group box height
+    const int opsH     = 44;
     const int opsY     = hidLblY - DY - opsH;
     const int selInfoY = opsY - DY - lblH;
 
-    // Top list fills remaining space
+    // Top list fills all available width (no side buttons)
     const int topListY = mY + lblH + 3;
     const int topListH = selInfoY - DY - topListY;
-    const int rightX   = W - mX - sideBtnW;
-    const int listW    = rightX - mX - 4;
+    const int listW    = W - 2*mX;
 
     // Helper
     auto Move = [&](int id, int x, int y, int w, int h) {
@@ -336,10 +356,8 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
             MoveWindow(hCtrl, x, y, w, h, FALSE);
     };
 
-    // Window list + side buttons
+    // Window list – full width
     Move(IDC_WINDOW_LIST, mX, topListY, listW, topListH);
-    Move(IDC_BTN_REFRESH, rightX, mY + lblH + 3,         sideBtnW, btnH);
-    Move(IDC_BTN_PICK,    rightX, mY + lblH + 3 + btnH + DY, sideBtnW, btnH);
 
     // Selected info label
     Move(IDC_SELECTED_INFO, mX, selInfoY, W - 2*mX, lblH);
@@ -350,20 +368,18 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     {
         const int bx = mX + 8, by = opsY + 18;
         const int bw0 = 100, bw1 = 118, bw2 = 96;
-        // WDA button takes the rest
         const int bw3 = W - 2*mX - 8 - bw0 - 4 - bw1 - 4 - bw2 - 4 - 8;
-        Move(IDC_BTN_TOPMOST,    bx,                    by, bw0, btnH);
-        Move(IDC_BTN_NO_TOPMOST, bx + bw0 + 4,          by, bw1, btnH);
-        Move(IDC_BTN_HIDE,       bx + bw0+4 + bw1+4,    by, bw2, btnH);
+        Move(IDC_BTN_TOPMOST,    bx,                         by, bw0, btnH);
+        Move(IDC_BTN_NO_TOPMOST, bx + bw0 + 4,               by, bw1, btnH);
+        Move(IDC_BTN_HIDE,       bx + bw0+4 + bw1+4,         by, bw2, btnH);
         Move(IDC_BTN_WDA,        bx + bw0+4 + bw1+4 + bw2+4, by,
              (bw3 > 80 ? bw3 : 80), btnH);
     }
 
-    // Hidden windows section
-    Move(IDC_GRP_HIDDEN,        mX, hidLblY,  W - 2*mX, lblH + 2);
-    Move(IDC_HIDDEN_LIST,       mX, hidListY, W - 2*mX, hidListH);
-    Move(IDC_BTN_SHOW,          mX,      hidBtnY, 110, hidBtnH);
-    Move(IDC_BTN_REMOVE_HIDDEN, mX + 116, hidBtnY, 130, hidBtnH);
+    // Hidden windows section – "Show Selected" button only (no "Remove from List")
+    Move(IDC_GRP_HIDDEN,  mX, hidLblY,  W - 2*mX, lblH + 2);
+    Move(IDC_HIDDEN_LIST, mX, hidListY, W - 2*mX, hidListH);
+    Move(IDC_BTN_SHOW,    mX, hidBtnY,  110, hidBtnH);
 
     // Status bar
     Move(IDC_STATUS_TEXT, mX, statusY, W - 2*mX, statusH);
@@ -382,9 +398,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------------
     case WM_INITDIALOG:
     {
-        g_hDlg  = hDlg;
-        g_hCross = LoadCursorW(nullptr, IDC_CROSS);
-        g_hArrow = LoadCursorW(nullptr, IDC_ARROW);
+        g_hDlg = hDlg;
 
         // Centre the dialog on the primary monitor.
         {
@@ -398,7 +412,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         // Init ListView columns.
-        InitListViewColumns(GetDlgItem(hDlg, IDC_WINDOW_LIST));
+        InitMainListViewColumns(GetDlgItem(hDlg, IDC_WINDOW_LIST));
         InitListViewColumns(GetDlgItem(hDlg, IDC_HIDDEN_LIST));
 
         // Enable full-row selection and grid lines.
@@ -409,12 +423,67 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         SetLVStyle(GetDlgItem(hDlg, IDC_WINDOW_LIST));
         SetLVStyle(GetDlgItem(hDlg, IDC_HIDDEN_LIST));
 
+        // Add tray icon.
+        CreateTrayIcon(hDlg);
+
+        // Initial list population and start the refresh timer.
         PopulateWindowList(hDlg);
+        SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
 
         // Trigger initial layout.
         {
             RECT rc; GetClientRect(hDlg, &rc);
             OnSize(hDlg, rc.right, rc.bottom);
+        }
+        return TRUE;
+    }
+
+    // --------------------------------------------------------------------
+    // Auto-refresh on focus; placeholder when unfocused.
+    case WM_ACTIVATE:
+    {
+        if (LOWORD(wParam) == WA_INACTIVE) {
+            KillTimer(hDlg, IDT_REFRESH);
+            ShowPlaceholder(hDlg);
+        } else {
+            PopulateWindowList(hDlg);
+            UpdateSelectedInfo(hDlg);
+            SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
+        }
+        return FALSE;
+    }
+
+    // --------------------------------------------------------------------
+    case WM_TIMER:
+        if (wParam == IDT_REFRESH) {
+            PopulateWindowList(hDlg, true); // preserve selection
+            UpdateSelectedInfo(hDlg);
+        }
+        return TRUE;
+
+    // --------------------------------------------------------------------
+    case WM_TRAYICON:
+    {
+        switch (lParam)
+        {
+        case WM_RBUTTONUP:
+        {
+            POINT pt;
+            GetCursorPos(&pt);
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenuW(hMenu, MF_STRING, IDM_TRAY_SHOW,
+                IsWindowVisible(hDlg) ? L"Hide Window" : L"Show Window");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hMenu, MF_STRING, IDM_TRAY_EXIT, L"Exit");
+            SetForegroundWindow(hDlg);
+            TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hDlg, nullptr);
+            DestroyMenu(hMenu);
+            break;
+        }
+        case WM_LBUTTONDBLCLK:
+            ShowWindow(hDlg, SW_SHOW);
+            SetForegroundWindow(hDlg);
+            break;
         }
         return TRUE;
     }
@@ -433,88 +502,54 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     // --------------------------------------------------------------------
-    case WM_SETCURSOR:
-        if (g_picking) {
-            SetCursor(g_hCross);
-            return TRUE; // prevent DefDlgProc from resetting cursor
-        }
-        break;
-
-    // --------------------------------------------------------------------
-    case WM_MOUSEMOVE:
-        if (g_picking) {
-            POINT pt;
-            GetCursorPos(&pt);
-
-            // Find the real window under the cursor (skip our dialog).
-            HWND hHover = WindowFromPoint(pt);
-            // Walk up to the top-level window.
-            if (hHover) {
-                HWND parent = GetAncestor(hHover, GA_ROOT);
-                if (parent) hHover = parent;
-            }
-            if (hHover == hDlg) hHover = nullptr;
-
-            if (hHover != g_lastHighlighted) {
-                if (g_lastHighlighted)
-                    EraseHighlight(g_lastHighlighted);
-                g_lastHighlighted = hHover;
-                if (hHover)
-                    DrawHighlight(hHover);
-
-                // Show info in status bar while hovering.
-                if (hHover) {
-                    wchar_t title[256] = {};
-                    GetWindowTextW(hHover, title, 256);
-                    DWORD pid = 0;
-                    GetWindowThreadProcessId(hHover, &pid);
-                    SetStatus(hDlg,
-                        std::wstring(L"Hovering: \"") + title
-                        + L"\"  " + GetProcessName(pid)
-                        + L"  PID:" + std::to_wstring(pid));
-                }
-            }
-            SetCursor(g_hCross);
-        }
-        return TRUE;
-
-    // --------------------------------------------------------------------
-    case WM_LBUTTONUP:
-        if (g_picking) {
-            HWND picked = g_lastHighlighted;
-            StopPicking(hDlg, false);
-            if (picked && IsWindow(picked)) {
-                // Make sure the list is up-to-date, then select.
-                PopulateWindowList(hDlg);
-                SelectByHwnd(hDlg, picked);
-                UpdateSelectedInfo(hDlg);
-            }
-        }
-        return TRUE;
-
-    // --------------------------------------------------------------------
-    case WM_RBUTTONUP:
-        if (g_picking) {
-            StopPicking(hDlg, true);
-        }
-        return TRUE;
-
-    // --------------------------------------------------------------------
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE && g_picking) {
-            StopPicking(hDlg, true);
-            return TRUE;
-        }
-        break;
-
-    // --------------------------------------------------------------------
     case WM_NOTIFY:
     {
         auto* pNMHDR = reinterpret_cast<LPNMHDR>(lParam);
-        if (pNMHDR->idFrom == IDC_WINDOW_LIST &&
-            pNMHDR->code == LVN_ITEMCHANGED)
-        {
-            UpdateSelectedInfo(hDlg);
+        if (pNMHDR->idFrom == IDC_WINDOW_LIST) {
+            if (pNMHDR->code == LVN_ITEMCHANGED) {
+                UpdateSelectedInfo(hDlg);
+            } else if (pNMHDR->code == NM_CLICK) {
+                // Click on TopMost or Excl.Cap column toggles state inline.
+                auto* pIA = reinterpret_cast<NMITEMACTIVATE*>(lParam);
+                if (pIA->iItem >= 0 &&
+                    pIA->iItem < static_cast<int>(g_windows.size()))
+                {
+                    const WindowInfo& w = g_windows[pIA->iItem];
+                    HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
+
+                    if (pIA->iSubItem == 4) {
+                        // Toggle TopMost
+                        bool newState = !IsWindowTopMost(w.hwnd);
+                        if (SetWindowTopMost(w.hwnd, newState)) {
+                            ListView_SetItemText(hList, pIA->iItem, 4,
+                                const_cast<LPWSTR>(newState ? L"\u2713" : L""));
+                            SetStatus(hDlg, newState
+                                ? L"Set TOPMOST: \"" + w.title + L"\""
+                                : L"Removed TOPMOST: \"" + w.title + L"\"");
+                        }
+                    } else if (pIA->iSubItem == 5) {
+                        // Toggle ExcludeCapture via injection
+                        bool curState = IsWindowExcludeFromCapture(w.hwnd);
+                        // WDA_NONE=0 to remove, WDA_EXCLUDEFROMCAPTURE=0x11 to set
+                        DWORD newAffinity = curState ? 0x00000000u : 0x00000011u;
+                        SetStatus(hDlg, L"Injecting \u2026");
+                        if (InjectWDASetAffinity(w.hwnd, newAffinity)) {
+                            bool newState = !curState;
+                            ListView_SetItemText(hList, pIA->iItem, 5,
+                                const_cast<LPWSTR>(newState ? L"\u2713" : L""));
+                            SetStatus(hDlg, newState
+                                ? L"ExcludeCapture enabled: \"" + w.title + L"\""
+                                : L"ExcludeCapture disabled: \"" + w.title + L"\"");
+                        } else {
+                            SetStatus(hDlg,
+                                L"Injection failed (error "
+                                + std::to_wstring(GetLastError())
+                                + L"). Run as Administrator and ensure "
+                                  L"wda_inject.dll is beside the exe.");
+                        }
+                    }
+                }
+            }
         }
         break;
     }
@@ -526,27 +561,21 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         switch (id)
         {
-        case IDC_BTN_REFRESH:
-            PopulateWindowList(hDlg);
-            UpdateSelectedInfo(hDlg);
-            break;
-
-        case IDC_BTN_PICK:
-            if (g_picking)
-                StopPicking(hDlg, true);
-            else
-                StartPicking(hDlg);
-            break;
-
         case IDC_BTN_TOPMOST:
         {
             const WindowInfo* w = GetSelectedWindow(hDlg);
             if (!w) { SetStatus(hDlg, L"No window selected."); break; }
-            if (SetWindowTopMost(w->hwnd, true))
+            if (SetWindowTopMost(w->hwnd, true)) {
                 SetStatus(hDlg, L"Set TOPMOST: \"" + w->title + L"\"");
-            else
+                HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
+                int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+                if (sel >= 0)
+                    ListView_SetItemText(hList, sel, 4,
+                        const_cast<LPWSTR>(L"\u2713"));
+            } else {
                 SetStatus(hDlg, L"Failed to set TOPMOST (error "
                     + std::to_wstring(GetLastError()) + L")");
+            }
             break;
         }
 
@@ -554,11 +583,17 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             const WindowInfo* w = GetSelectedWindow(hDlg);
             if (!w) { SetStatus(hDlg, L"No window selected."); break; }
-            if (SetWindowTopMost(w->hwnd, false))
+            if (SetWindowTopMost(w->hwnd, false)) {
                 SetStatus(hDlg, L"Removed TOPMOST: \"" + w->title + L"\"");
-            else
+                HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
+                int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+                if (sel >= 0)
+                    ListView_SetItemText(hList, sel, 4,
+                        const_cast<LPWSTR>(L""));
+            } else {
                 SetStatus(hDlg, L"Failed to remove TOPMOST (error "
                     + std::to_wstring(GetLastError()) + L")");
+            }
             break;
         }
 
@@ -592,16 +627,22 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             const WindowInfo* w = GetSelectedWindow(hDlg);
             if (!w) { SetStatus(hDlg, L"No window selected."); break; }
             SetStatus(hDlg, L"Injecting DLL into \""
-                + w->title + L"\" …");
-            if (InjectWDAExcludeFromCapture(w->hwnd))
+                + w->title + L"\" \u2026");
+            if (InjectWDAExcludeFromCapture(w->hwnd)) {
                 SetStatus(hDlg, L"WDA_EXCLUDEFROMCAPTURE applied to \""
                     + w->title + L"\"");
-            else
+                HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
+                int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+                if (sel >= 0)
+                    ListView_SetItemText(hList, sel, 5,
+                        const_cast<LPWSTR>(L"\u2713"));
+            } else {
                 SetStatus(hDlg,
                     L"Injection failed (error "
                     + std::to_wstring(GetLastError())
                     + L"). Run as Administrator and ensure "
                       L"wda_inject.dll is beside the exe.");
+            }
             break;
         }
 
@@ -632,28 +673,26 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             break;
         }
 
-        case IDC_BTN_REMOVE_HIDDEN:
-        {
-            HWND hList = GetDlgItem(hDlg, IDC_HIDDEN_LIST);
-            int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-            if (sel < 0 || sel >= static_cast<int>(g_hiddenWindows.size())) {
-                SetStatus(hDlg, L"No hidden window selected.");
-                break;
+        case IDM_TRAY_SHOW:
+            if (IsWindowVisible(hDlg)) {
+                ShowWindow(hDlg, SW_HIDE);
+            } else {
+                ShowWindow(hDlg, SW_SHOW);
+                SetForegroundWindow(hDlg);
             }
-            std::wstring title = g_hiddenWindows[sel].title;
-            g_hiddenWindows.erase(g_hiddenWindows.begin() + sel);
-            PopulateHiddenList(hDlg);
-            SetStatus(hDlg, L"Removed from hidden list (not restored): \""
-                + title + L"\"");
             break;
-        }
+
+        case IDM_TRAY_EXIT:
+            // Restore hidden windows, then actually quit.
+            KillTimer(hDlg, IDT_REFRESH);
+            RestoreAllHiddenWindows();
+            DestroyTrayIcon();
+            EndDialog(hDlg, 0);
+            break;
 
         case IDCANCEL:
-            if (g_picking) {
-                StopPicking(hDlg, true);
-            } else {
-                EndDialog(hDlg, 0);
-            }
+            // ESC or dialog cancel – hide to tray instead of closing.
+            ShowWindow(hDlg, SW_HIDE);
             return TRUE;
         }
         break;
@@ -661,9 +700,8 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
     // --------------------------------------------------------------------
     case WM_CLOSE:
-        if (g_picking)
-            StopPicking(hDlg, true);
-        EndDialog(hDlg, 0);
+        // Close button hides to tray; actual exit is via tray menu "Exit".
+        ShowWindow(hDlg, SW_HIDE);
         return TRUE;
     }
 

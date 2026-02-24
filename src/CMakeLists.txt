@@ -19,11 +19,17 @@ target_compile_definitions(window_mod PRIVATE
 
 target_compile_features(window_mod PRIVATE cxx_std_17)
 
+# MinGW needs -municode so that the CRT startup code calls wWinMain.
+if (MINGW)
+    target_link_options(window_mod PRIVATE -municode)
+endif()
+
 target_link_libraries(window_mod PRIVATE
     user32
     gdi32
     psapi
     comctl32
+    shell32
 )
 
 # Copy the injection DLL next to the exe after build.

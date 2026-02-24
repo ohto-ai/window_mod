@@ -13,10 +13,7 @@ BEGIN
     CONTROL         "", IDC_WINDOW_LIST, "SysListView32",
                     LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
                     WS_BORDER | WS_TABSTOP,
-                    7, 18, 340, 120
-
-    PUSHBUTTON      "Refresh",      IDC_BTN_REFRESH, 354, 18,  60, 14
-    PUSHBUTTON      "Pick Window",  IDC_BTN_PICK,    354, 36,  60, 14
+                    7, 18, 406, 120
 
     // ---- Selected window info ----------------------------------------------
     LTEXT           "", IDC_SELECTED_INFO, 7, 142, 406, 8
@@ -37,8 +34,7 @@ BEGIN
                     WS_BORDER | WS_TABSTOP,
                     7, 206, 406, 72
 
-    PUSHBUTTON      "Show Selected",   IDC_BTN_SHOW,         7,  282, 72, 14
-    PUSHBUTTON      "Remove from List",IDC_BTN_REMOVE_HIDDEN,86, 282, 80, 14
+    PUSHBUTTON      "Show Selected",   IDC_BTN_SHOW, 7, 282, 72, 14
 
     // ---- Status bar --------------------------------------------------------
     LTEXT           "Ready", IDC_STATUS_TEXT, 7, 298, 406, 8
