@@ -4,13 +4,14 @@
  * Features:
  *  - Dark theme (DWM immersive dark mode + custom WM_CTLCOLOR handling)
  *  - Screen preview with per-monitor tab switching
- *  - Enumerate visible windows; checkbox per row toggles WDA_EXCLUDEFROMCAPTURE
- *  - Auto-refresh list when focused; show ":)" placeholder when unfocused
+ *  - Enumerate visible windows (including own); checkbox per row toggles WDA_EXCLUDEFROMCAPTURE
+ *  - Refresh list + preview on mouse activity (WH_MOUSE_LL hook, 300 ms debounce)
  *  - TopMost toggle button (selected window)
  *  - Hide windows (SW_HIDE) tracked in a separate list for recovery
  *  - Inject wda_inject.dll to set/clear WDA_EXCLUDEFROMCAPTURE
  *  - System tray icon: close button hides to tray; exit only via tray menu
  *  - Restore all hidden windows when exiting
+ *  - Process icon shown per list row (rows without an icon show no icon)
  */
 
 #include <windows.h>
@@ -84,10 +85,23 @@ static HFONT  g_hFontBold = nullptr;
 static NOTIFYICONDATA g_nid       = {};
 static bool           g_trayAdded = false;
 
+// Low-level mouse hook – used to trigger list+preview refresh on mouse activity.
+static HHOOK g_mouseHook = nullptr;
+
 // ============================================================================
 // Forward declarations
 // ============================================================================
 INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// Low-level mouse hook: debounce into a one-shot IDT_REFRESH timer.
+static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && g_hDlg && g_hasFocus) {
+        KillTimer(g_hDlg, IDT_REFRESH);
+        SetTimer(g_hDlg, IDT_REFRESH, 300, nullptr);
+    }
+    return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+}
 
 // ============================================================================
 // WinMain
@@ -232,18 +246,30 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 
     g_populatingList = true;
     ListView_DeleteAllItems(hList);
-    g_windows = EnumerateWindows(hDlg);
+    g_windows = EnumerateWindows(); // include our own window
+
+    // Build an image list from per-window icons.
+    int n = static_cast<int>(g_windows.size());
+    HIMAGELIST hImgList = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, n, 0);
+    std::vector<int> imgIdx(n, -1);
+    for (int i = 0; i < n; ++i) {
+        if (g_windows[i].hIcon)
+            imgIdx[i] = ImageList_AddIcon(hImgList, g_windows[i].hIcon);
+    }
+    HIMAGELIST hOld = ListView_SetImageList(hList, hImgList, LVSIL_SMALL);
+    if (hOld) ImageList_Destroy(hOld);
 
     LVITEMW lvi = {};
-    lvi.mask = LVIF_TEXT | LVIF_PARAM;
 
-    for (int i = 0; i < static_cast<int>(g_windows.size()); ++i) {
+    for (int i = 0; i < n; ++i) {
         const auto& w = g_windows[i];
 
         lvi.iItem    = i;
         lvi.iSubItem = 0;
         lvi.lParam   = static_cast<LPARAM>(i);
         lvi.pszText  = const_cast<LPWSTR>(w.title.c_str());
+        lvi.iImage   = imgIdx[i];
+        lvi.mask     = LVIF_TEXT | LVIF_PARAM | (imgIdx[i] >= 0 ? LVIF_IMAGE : 0);
         ListView_InsertItem(hList, &lvi);
 
         ListView_SetItemText(hList, i, 1,
@@ -596,10 +622,15 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         // Tray icon
         CreateTrayIcon(hDlg);
 
-        // Populate list and start timers
+        // Install low-level mouse hook for mouse-driven refresh.
+        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc,
+                                        GetModuleHandleW(nullptr), 0);
+        // Fallback: if hook unavailable, use a periodic refresh timer.
+        if (!g_mouseHook)
+            SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
+
+        // Populate list (initial capture already done above).
         PopulateWindowList(hDlg);
-        SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
-        SetTimer(hDlg, IDT_PREVIEW, 500,  nullptr);
 
         // Trigger initial layout
         {
@@ -615,8 +646,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         if (LOWORD(wParam) == WA_INACTIVE) {
             g_hasFocus = false;
-            KillTimer(hDlg, IDT_REFRESH);
-            KillTimer(hDlg, IDT_PREVIEW);
+            KillTimer(hDlg, IDT_REFRESH); // cancel any pending debounce
             // Release the last capture so the process is not held
             if (g_previewBmp) {
                 DeleteObject(g_previewBmp);
@@ -630,8 +660,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             CaptureMonitor(g_currentMonitor);
             PopulateWindowList(hDlg);
             UpdateSelectedInfo(hDlg);
-            SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
-            SetTimer(hDlg, IDT_PREVIEW, 500,  nullptr);
+            // If the mouse hook is unavailable, restart the fallback timer.
+            if (!g_mouseHook)
+                SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
             if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
                 InvalidateRect(hPrev, nullptr, FALSE);
         }
@@ -641,9 +672,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------------
     case WM_TIMER:
         if (wParam == IDT_REFRESH) {
+            if (g_mouseHook) KillTimer(hDlg, IDT_REFRESH); // one-shot when hook active
             PopulateWindowList(hDlg, true);
             UpdateSelectedInfo(hDlg);
-        } else if (wParam == IDT_PREVIEW) {
             CaptureMonitor(g_currentMonitor);
             if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
                 InvalidateRect(hPrev, nullptr, FALSE);
@@ -1019,7 +1050,6 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case IDM_TRAY_EXIT:
             KillTimer(hDlg, IDT_REFRESH);
-            KillTimer(hDlg, IDT_PREVIEW);
             RestoreAllHiddenWindows();
             DestroyTrayIcon();
             EndDialog(hDlg, 0);
@@ -1035,9 +1065,15 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
     // --------------------------------------------------------------------
     case WM_DESTROY:
+        if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = nullptr; }
         if (g_hbrBg)     { DeleteObject(g_hbrBg);     g_hbrBg     = nullptr; }
         if (g_hFontBold) { DeleteObject(g_hFontBold); g_hFontBold = nullptr; }
         if (g_previewBmp){ DeleteObject(g_previewBmp); g_previewBmp = nullptr; }
+        // Release the image list attached to the window list view.
+        if (HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST)) {
+            HIMAGELIST hImgList = ListView_GetImageList(hList, LVSIL_SMALL);
+            if (hImgList) ImageList_Destroy(hImgList);
+        }
         break;
 
     // --------------------------------------------------------------------
