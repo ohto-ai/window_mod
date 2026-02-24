@@ -31,6 +31,7 @@ target_link_libraries(window_mod PRIVATE
     comctl32
     shell32
     dwmapi
+    uxtheme
 )
 
 # Copy the injection DLL next to the exe after build.

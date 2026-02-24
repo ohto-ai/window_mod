@@ -17,6 +17,7 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -31,14 +32,19 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 // ============================================================================
 // Dark theme colours
 // ============================================================================
-static const COLORREF CLR_BG       = RGB(0x1e, 0x1e, 0x2e);
-static const COLORREF CLR_TEXT     = RGB(0xe0, 0xe0, 0xe0);
-static const COLORREF CLR_SUBTEXT  = RGB(0x88, 0x88, 0xaa);
-static const COLORREF CLR_LIST_BG  = RGB(0x22, 0x22, 0x35);
+static const COLORREF CLR_BG        = RGB(0x1e, 0x1e, 0x2e);
+static const COLORREF CLR_TEXT      = RGB(0xe0, 0xe0, 0xe0);
+static const COLORREF CLR_SUBTEXT   = RGB(0x88, 0x88, 0xaa);
+static const COLORREF CLR_LIST_BG   = RGB(0x22, 0x22, 0x35);
+static const COLORREF CLR_BTN_BG    = RGB(0x31, 0x32, 0x4a);
+static const COLORREF CLR_BTN_PRESS = RGB(0x45, 0x47, 0x6b);
+static const COLORREF CLR_BTN_BORDER= RGB(0x58, 0x5b, 0x70);
+static const COLORREF CLR_BTN_FOCUS = RGB(0x89, 0xb4, 0xfa);
 
 // Preview geometry constants
 static const int PREVIEW_H_MIN   = 80;   // minimum preview height in pixels
@@ -66,6 +72,9 @@ static HBITMAP           g_previewBmp     = nullptr;
 
 // Suppress LVN_ITEMCHANGED side-effects during programmatic list updates
 static bool g_populatingList = false;
+
+// True when the dialog is the active (foreground) window
+static bool g_hasFocus = true;
 
 // Dark theme GDI resources
 static HBRUSH g_hbrBg    = nullptr;
@@ -541,6 +550,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             ListView_SetBkColor(hList, CLR_LIST_BG);
             ListView_SetTextBkColor(hList, CLR_LIST_BG);
             ListView_SetTextColor(hList, CLR_TEXT);
+            SetWindowTheme(hList, L"DarkMode_Explorer", nullptr);
         }
 
         // Init hidden list view
@@ -552,12 +562,14 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             ListView_SetBkColor(hList, CLR_LIST_BG);
             ListView_SetTextBkColor(hList, CLR_LIST_BG);
             ListView_SetTextColor(hList, CLR_TEXT);
+            SetWindowTheme(hList, L"DarkMode_Explorer", nullptr);
         }
 
         // Enumerate monitors and populate tabs
         EnumerateMonitors();
         {
             HWND hTab = GetDlgItem(hDlg, IDC_TAB_SCREENS);
+            SetWindowTheme(hTab, L"DarkMode_Explorer", nullptr);
             for (int i = 0; i < static_cast<int>(g_monitors.size()); ++i) {
                 wchar_t label[32];
                 swprintf_s(label, L"Screen %d", i + 1);
@@ -567,6 +579,15 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 TabCtrl_InsertItem(hTab, i, &tie);
             }
             TabCtrl_SetCurSel(hTab, 0);
+        }
+
+        // Apply owner-draw style to buttons for flat dark appearance
+        for (int btnId : {IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_SHOW}) {
+            HWND hBtn = GetDlgItem(hDlg, btnId);
+            LONG_PTR style = GetWindowLongPtrW(hBtn, GWL_STYLE);
+            style = (style & ~static_cast<LONG_PTR>(BS_TYPEMASK))
+                  | static_cast<LONG_PTR>(BS_OWNERDRAW);
+            SetWindowLongPtrW(hBtn, GWL_STYLE, style);
         }
 
         // Initial screen capture
@@ -593,12 +614,26 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_ACTIVATE:
     {
         if (LOWORD(wParam) == WA_INACTIVE) {
+            g_hasFocus = false;
             KillTimer(hDlg, IDT_REFRESH);
+            KillTimer(hDlg, IDT_PREVIEW);
+            // Release the last capture so the process is not held
+            if (g_previewBmp) {
+                DeleteObject(g_previewBmp);
+                g_previewBmp = nullptr;
+            }
             ShowPlaceholder(hDlg);
+            if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
+                InvalidateRect(hPrev, nullptr, FALSE);
         } else {
+            g_hasFocus = true;
+            CaptureMonitor(g_currentMonitor);
             PopulateWindowList(hDlg);
             UpdateSelectedInfo(hDlg);
             SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
+            SetTimer(hDlg, IDT_PREVIEW, 500,  nullptr);
+            if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
+                InvalidateRect(hPrev, nullptr, FALSE);
         }
         return FALSE;
     }
@@ -616,19 +651,84 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         return TRUE;
 
     // --------------------------------------------------------------------
-    // Owner-draw the screen preview static control.
+    // Owner-draw: preview static + flat dark buttons.
     case WM_DRAWITEM:
     {
         auto* di = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+
+        // ---- Flat owner-draw buttons ----------------------------------------
+        if (di->CtlType == ODT_BUTTON) {
+            HDC  hDC = di->hDC;
+            RECT rc  = di->rcItem;
+            bool pressed  = (di->itemState & ODS_SELECTED) != 0;
+            bool focused  = (di->itemState & ODS_FOCUS)    != 0;
+            bool disabled = (di->itemState & ODS_DISABLED) != 0;
+
+            // Off-screen buffer to avoid flicker
+            int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
+            HDC     hBuf    = CreateCompatibleDC(hDC);
+            HBITMAP hBufBmp = CreateCompatibleBitmap(hDC, bw, bh);
+            HGDIOBJ hBufOld = SelectObject(hBuf, hBufBmp);
+
+            RECT rcBuf = { 0, 0, bw, bh };
+            COLORREF bgCol = pressed ? CLR_BTN_PRESS : CLR_BTN_BG;
+            HBRUSH hBrBg = CreateSolidBrush(bgCol);
+            FillRect(hBuf, &rcBuf, hBrBg);
+            DeleteObject(hBrBg);
+
+            COLORREF borderCol = focused ? CLR_BTN_FOCUS : CLR_BTN_BORDER;
+            HPEN hPen = CreatePen(PS_SOLID, 1, borderCol);
+            HGDIOBJ oldPen   = SelectObject(hBuf, hPen);
+            HGDIOBJ oldBrush = SelectObject(hBuf, GetStockObject(NULL_BRUSH));
+            Rectangle(hBuf, 0, 0, bw, bh);
+            SelectObject(hBuf, oldPen);
+            SelectObject(hBuf, oldBrush);
+            DeleteObject(hPen);
+
+            wchar_t text[256] = {};
+            GetWindowTextW(di->hwndItem, text, 256);
+            SetBkMode(hBuf, TRANSPARENT);
+            SetTextColor(hBuf, disabled ? CLR_SUBTEXT : CLR_TEXT);
+            HFONT hFont = reinterpret_cast<HFONT>(
+                SendMessageW(di->hwndItem, WM_GETFONT, 0, 0));
+            HGDIOBJ oldFont = SelectObject(hBuf, hFont ? hFont : GetStockObject(DEFAULT_GUI_FONT));
+            DrawTextW(hBuf, text, -1, &rcBuf, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(hBuf, oldFont);
+
+            BitBlt(hDC, rc.left, rc.top, bw, bh, hBuf, 0, 0, SRCCOPY);
+            SelectObject(hBuf, hBufOld);
+            DeleteObject(hBufBmp);
+            DeleteDC(hBuf);
+            return TRUE;
+        }
+
+        // ---- Screen preview static control ----------------------------------
         if (di->CtlType == ODT_STATIC && di->CtlID == IDC_PREVIEW_STATIC) {
             HDC  hDC = di->hDC;
             RECT rc  = di->rcItem;
             int  dw  = rc.right  - rc.left;
             int  dh  = rc.bottom - rc.top;
 
-            FillRect(hDC, &rc, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            // Double-buffer: render into off-screen DC, then blit once
+            HDC     hBuf    = CreateCompatibleDC(hDC);
+            HBITMAP hBufBmp = CreateCompatibleBitmap(hDC, dw, dh);
+            HGDIOBJ hBufOld = SelectObject(hBuf, hBufBmp);
+            RECT rcBuf = { 0, 0, dw, dh };
 
-            if (g_previewBmp && !g_monitors.empty()) {
+            FillRect(hBuf, &rcBuf, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+
+            if (!g_hasFocus) {
+                // Show ":)" placeholder when unfocused – no screen capture
+                SetBkMode(hBuf, TRANSPARENT);
+                SetTextColor(hBuf, CLR_SUBTEXT);
+                HFONT hBig = CreateFontW(dh / 2, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                HGDIOBJ oldF = SelectObject(hBuf, hBig);
+                DrawTextW(hBuf, L":)", -1, &rcBuf, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(hBuf, oldF);
+                DeleteObject(hBig);
+            } else if (g_previewBmp && !g_monitors.empty()) {
                 int mi = (g_currentMonitor < static_cast<int>(g_monitors.size()))
                          ? g_currentMonitor : 0;
                 const RECT& mr = g_monitors[mi];
@@ -650,16 +750,22 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                         drawX = 0;
                         drawY = (dh - drawH) / 2;
                     }
-                    HDC     hMem = CreateCompatibleDC(hDC);
+                    HDC     hMem = CreateCompatibleDC(hBuf);
                     HGDIOBJ old  = SelectObject(hMem, g_previewBmp);
-                    SetStretchBltMode(hDC, HALFTONE);
-                    SetBrushOrgEx(hDC, 0, 0, nullptr);
-                    StretchBlt(hDC, drawX, drawY, drawW, drawH,
+                    SetStretchBltMode(hBuf, HALFTONE);
+                    SetBrushOrgEx(hBuf, 0, 0, nullptr);
+                    StretchBlt(hBuf, drawX, drawY, drawW, drawH,
                                hMem, 0, 0, sw, sh, SRCCOPY);
                     SelectObject(hMem, old);
                     DeleteDC(hMem);
                 }
             }
+
+            // Single blit to the real DC – no intermediate flash
+            BitBlt(hDC, rc.left, rc.top, dw, dh, hBuf, 0, 0, SRCCOPY);
+            SelectObject(hBuf, hBufOld);
+            DeleteObject(hBufBmp);
+            DeleteDC(hBuf);
             return TRUE;
         }
         break;
