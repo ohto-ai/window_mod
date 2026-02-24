@@ -9,6 +9,7 @@ struct WindowInfo {
     std::wstring title;
     std::wstring processName;
     DWORD       pid;
+    HICON       hIcon; // small icon, nullptr if none
 };
 
 /// Return a snapshot of all visible top-level windows that have a title.

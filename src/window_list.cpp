@@ -43,7 +43,17 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam)
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
 
-    ctx->list->push_back({ hwnd, title, GetProcessName(pid), pid });
+    // Try to get the window's small icon (do not destroy – shared handle).
+    HICON hIcon = reinterpret_cast<HICON>(
+        SendMessageW(hwnd, WM_GETICON, ICON_SMALL2, 0));
+    if (!hIcon)
+        hIcon = reinterpret_cast<HICON>(
+            SendMessageW(hwnd, WM_GETICON, ICON_SMALL, 0));
+    if (!hIcon)
+        hIcon = reinterpret_cast<HICON>(
+            GetClassLongPtrW(hwnd, GCLP_HICONSM));
+
+    ctx->list->push_back({ hwnd, title, GetProcessName(pid), pid, hIcon });
     return TRUE;
 }
 
