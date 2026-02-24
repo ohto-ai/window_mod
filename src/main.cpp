@@ -40,6 +40,16 @@ static const COLORREF CLR_TEXT     = RGB(0xe0, 0xe0, 0xe0);
 static const COLORREF CLR_SUBTEXT  = RGB(0x88, 0x88, 0xaa);
 static const COLORREF CLR_LIST_BG  = RGB(0x22, 0x22, 0x35);
 
+// Preview geometry constants
+static const int PREVIEW_H_MIN   = 80;   // minimum preview height in pixels
+static const int PREVIEW_H_MAX   = 200;  // maximum preview height in pixels
+static const int PREVIEW_H_PCT   = 30;   // preview height as % of window height
+
+// LVS_EX_CHECKBOXES state-image index constants (LVIS_STATEIMAGEMASK >> 12)
+static const UINT STATE_IMAGE_SHIFT     = 12;
+static const UINT STATE_IMAGE_UNCHECKED = 1;
+static const UINT STATE_IMAGE_CHECKED   = 2;
+
 // ============================================================================
 // State
 // ============================================================================
@@ -419,8 +429,9 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     int prevLblY = top;  top += bigH + 2;
     int prevSubY = top;  top += subH + DY;
     int previewY = top;
-    // Preview height: 30% of window height, clamped to [80, 200]
-    int previewH = std::max(80, std::min(200, H * 30 / 100));
+    // Window list fills the gap between top and bottom zones
+    int previewH = std::max(PREVIEW_H_MIN,
+                            std::min(PREVIEW_H_MAX, H * PREVIEW_H_PCT / 100));
     top += previewH + DY;
     int tabY     = top;  top += 22 + DY + 4;
     int hideAppY = top;  top += bigH + 2;
@@ -488,9 +499,10 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         // Dark title bar (Windows 10 v2004+ uses value 20; older builds used 19)
         BOOL dark = TRUE;
-        DwmSetWindowAttribute(hDlg, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/,
-                              &dark, sizeof(dark));
-        DwmSetWindowAttribute(hDlg, 19, &dark, sizeof(dark));
+        HRESULT hr = DwmSetWindowAttribute(hDlg,
+            20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+        if (FAILED(hr))
+            DwmSetWindowAttribute(hDlg, 19, &dark, sizeof(dark));
 
         // Dark theme brush
         g_hbrBg = CreateSolidBrush(CLR_BG);
@@ -750,13 +762,16 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 auto* pnm = reinterpret_cast<LPNMLISTVIEW>(lParam);
                 if (pnm->uChanged & LVIF_STATE) {
                     // Detect checkbox toggle (state-image index changed)
-                    UINT oldImg = (pnm->uOldState & LVIS_STATEIMAGEMASK) >> 12;
-                    UINT newImg = (pnm->uNewState & LVIS_STATEIMAGEMASK) >> 12;
-                    if (oldImg != newImg && oldImg != 0 && newImg != 0 &&
+                    UINT oldImg = (pnm->uOldState & LVIS_STATEIMAGEMASK)
+                                  >> STATE_IMAGE_SHIFT;
+                    UINT newImg = (pnm->uNewState & LVIS_STATEIMAGEMASK)
+                                  >> STATE_IMAGE_SHIFT;
+                    if (oldImg != newImg &&
+                        oldImg != 0 && newImg != 0 &&
                         pnm->iItem >= 0 &&
                         pnm->iItem < static_cast<int>(g_windows.size()))
                     {
-                        bool shouldExclude = (newImg == 2); // 2=checked
+                        bool shouldExclude = (newImg == STATE_IMAGE_CHECKED);
                         const WindowInfo& w = g_windows[pnm->iItem];
                         DWORD affinity = shouldExclude ? 0x00000011u : 0x00000000u;
                         SetStatus(hDlg, L"Injecting \u2026");
