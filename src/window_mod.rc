@@ -1,4 +1,5 @@
 // window_mod.rc  –  Dialog resource for Window Modifier
+#include <winresrc.h>
 #include "resource.h"
 
 // Define ListView styles inline to avoid including commctrl.h in RC

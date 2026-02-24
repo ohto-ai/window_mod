@@ -9,11 +9,6 @@
  *  - Inject wda_inject.dll to set WDA_EXCLUDEFROMCAPTURE
  */
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#define UNICODE
-#define _UNICODE
-
 #include <windows.h>
 #include <commctrl.h>
 #include <string>

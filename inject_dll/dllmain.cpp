@@ -12,8 +12,6 @@
  * WDA_EXCLUDEFROMCAPTURE.
  */
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <windows.h>
 
 // Same name as in src/injector.cpp
