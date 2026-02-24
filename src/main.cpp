@@ -5,7 +5,7 @@
  *  - Dark theme (DWM immersive dark mode + custom WM_CTLCOLOR handling)
  *  - Screen preview with per-monitor tab switching
  *  - Enumerate visible windows (including own); checkbox per row toggles WDA_EXCLUDEFROMCAPTURE
- *  - Refresh list + preview on mouse activity (WH_MOUSE_LL hook, 300 ms debounce)
+ *  - Refresh list on focus gain (background thread); continuous preview while focused
  *  - TopMost toggle button (selected window)
  *  - Hide windows (SW_HIDE) tracked in a separate list for recovery
  *  - Inject wda_inject.dll to set/clear WDA_EXCLUDEFROMCAPTURE
@@ -34,6 +34,9 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
+
+// Posted by the background window-enumeration thread when the result is ready.
+#define WM_WINDOWS_UPDATED  (WM_APP + 1)
 
 // ============================================================================
 // Dark theme colours
@@ -86,27 +89,19 @@ static HFONT  g_hFontPlaceholder = nullptr; // large font for the focus-lost scr
 static NOTIFYICONDATA g_nid       = {};
 static bool           g_trayAdded = false;
 
-// Low-level mouse hook – used to trigger list+preview refresh on mouse activity.
-static HHOOK g_mouseHook        = nullptr;
-// Prevents the hook from resetting the debounce timer on every mouse event.
-static bool  g_refreshScheduled = false;
+// Critical section and pending buffer for background window enumeration.
+// g_pendingWindows is written by the background thread (under g_pendingLock)
+// and consumed by the UI thread in WM_WINDOWS_UPDATED.
+// g_windows is only ever written on the UI thread (WM_INITDIALOG and
+// WM_WINDOWS_UPDATED), so it needs no separate lock.
+static CRITICAL_SECTION        g_pendingLock;
+static std::vector<WindowInfo> g_pendingWindows;
+static LONG                    g_activeEnumThreads = 0; // tracks running background threads
 
 // ============================================================================
 // Forward declarations
 // ============================================================================
 INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
-
-// Low-level mouse hook: schedule a one-shot IDT_REFRESH timer on the FIRST
-// mouse event after each refresh (subsequent events within the 300 ms window
-// are ignored so the timer is not constantly reset).
-static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
-{
-    if (nCode == HC_ACTION && g_hDlg && g_hasFocus && !g_refreshScheduled) {
-        g_refreshScheduled = true;
-        SetTimer(g_hDlg, IDT_REFRESH, 300, nullptr);
-    }
-    return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
-}
 
 // ============================================================================
 // WinMain
@@ -249,9 +244,10 @@ static void InitMainListViewColumns(HWND hList)
 }
 
 // ---------------------------------------------------------------------------
-// Populate (or refresh) the main window list.
+// Populate (or refresh) the main window list from the current g_windows.
+// Does NOT enumerate windows – call TriggerWindowEnumeration() for that.
 
-static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
+static void RefreshWindowListUI(HWND hDlg, bool preserveSelection = false)
 {
     HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
 
@@ -264,7 +260,6 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 
     g_populatingList = true;
     ListView_DeleteAllItems(hList);
-    g_windows = EnumerateWindows(); // include our own window
 
     // Build an image list from per-window icons.
     int n = static_cast<int>(g_windows.size());
@@ -324,6 +319,28 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 }
 
 // ---------------------------------------------------------------------------
+// Background thread: enumerate windows then notify the UI thread.
+
+static DWORD WINAPI WindowEnumThreadProc(LPVOID)
+{
+    InterlockedIncrement(&g_activeEnumThreads);
+    auto windows = EnumerateWindows();
+    EnterCriticalSection(&g_pendingLock);
+    g_pendingWindows = std::move(windows);
+    LeaveCriticalSection(&g_pendingLock);
+    if (g_hDlg) PostMessageW(g_hDlg, WM_WINDOWS_UPDATED, 0, 0);
+    InterlockedDecrement(&g_activeEnumThreads);
+    return 0;
+}
+
+// Spawn a background window enumeration; the UI is updated via WM_WINDOWS_UPDATED.
+static void TriggerWindowEnumeration()
+{
+    HANDLE h = CreateThread(nullptr, 0, WindowEnumThreadProc, nullptr, 0, nullptr);
+    if (h) CloseHandle(h); // detach; lifetime tracked via g_activeEnumThreads
+}
+
+// ---------------------------------------------------------------------------
 // All regular control IDs – used to show/hide them en masse.
 static const int s_allControls[] = {
     IDC_PREVIEW_LABEL, IDC_PREVIEW_SUBTEXT, IDC_PREVIEW_STATIC, IDC_TAB_SCREENS,
@@ -335,7 +352,6 @@ static const int s_allControls[] = {
 // Show a full-page ":)" placeholder when the app loses focus.
 static void ShowPlaceholder(HWND hDlg)
 {
-    g_windows.clear();
     for (int id : s_allControls)
         if (HWND h = GetDlgItem(hDlg, id))
             ShowWindow(h, SW_HIDE);
@@ -673,15 +689,12 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         // Tray icon
         CreateTrayIcon(hDlg);
 
-        // Install low-level mouse hook for mouse-driven refresh.
-        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc,
-                                        GetModuleHandleW(nullptr), 0);
-        // Fallback: if hook unavailable, use a periodic refresh timer.
-        if (!g_mouseHook)
-            SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
+        // Initialise the critical section used by the background enum thread.
+        InitializeCriticalSection(&g_pendingLock);
 
-        // Populate list (initial capture already done above).
-        PopulateWindowList(hDlg);
+        // Initial synchronous window list populate (only at startup).
+        g_windows = EnumerateWindows();
+        RefreshWindowListUI(hDlg);
 
         // Trigger initial layout
         {
@@ -692,13 +705,12 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     // --------------------------------------------------------------------
-    // Auto-refresh on focus; placeholder when unfocused.
+    // Refresh list (background) + start/stop preview timer on focus change.
     case WM_ACTIVATE:
     {
         if (LOWORD(wParam) == WA_INACTIVE) {
             g_hasFocus = false;
-            g_refreshScheduled = false;
-            KillTimer(hDlg, IDT_REFRESH); // cancel any pending debounce
+            KillTimer(hDlg, IDT_PREVIEW); // stop continuous preview
             // Release the last capture so the process is not held
             if (g_previewBmp) {
                 DeleteObject(g_previewBmp);
@@ -708,12 +720,10 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         } else {
             g_hasFocus = true;
             HidePlaceholder(hDlg);
-            CaptureMonitor(g_currentMonitor);
-            PopulateWindowList(hDlg);
+            TriggerWindowEnumeration();           // async list refresh (background thread)
+            CaptureMonitor(g_currentMonitor);     // immediate preview snapshot
+            SetTimer(hDlg, IDT_PREVIEW, 150, nullptr); // start continuous preview
             UpdateSelectedInfo(hDlg);
-            // If the mouse hook is unavailable, restart the fallback timer.
-            if (!g_mouseHook)
-                SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
             if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
                 InvalidateRect(hPrev, nullptr, FALSE);
         }
@@ -722,16 +732,28 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
     // --------------------------------------------------------------------
     case WM_TIMER:
-        if (wParam == IDT_REFRESH) {
-            if (g_mouseHook) KillTimer(hDlg, IDT_REFRESH); // one-shot when hook active
-            g_refreshScheduled = false; // allow the next mouse event to schedule again
-            PopulateWindowList(hDlg, true);
-            UpdateSelectedInfo(hDlg);
+        if (wParam == IDT_PREVIEW) {
             CaptureMonitor(g_currentMonitor);
             if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
                 InvalidateRect(hPrev, nullptr, FALSE);
         }
         return TRUE;
+
+    // --------------------------------------------------------------------
+    // Background window enumeration completed: swap in new list and refresh UI.
+    case WM_WINDOWS_UPDATED:
+    {
+        EnterCriticalSection(&g_pendingLock);
+        g_windows = std::move(g_pendingWindows);
+        g_pendingWindows.clear();
+        LeaveCriticalSection(&g_pendingLock);
+
+        if (g_hasFocus) {
+            RefreshWindowListUI(hDlg, true);
+            UpdateSelectedInfo(hDlg);
+        }
+        return TRUE;
+    }
 
     // --------------------------------------------------------------------
     // Owner-draw: preview static + flat dark buttons.
@@ -1033,7 +1055,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             if (HideWindow(w->hwnd)) {
                 g_hiddenWindows.push_back(*w);
                 PopulateHiddenList(hDlg);
-                PopulateWindowList(hDlg);
+                TriggerWindowEnumeration();
                 UpdateSelectedInfo(hDlg);
                 SetStatus(hDlg, L"Hidden: \"" + w->title + L"\"");
             } else {
@@ -1083,7 +1105,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 SetStatus(hDlg, L"Restored: \"" + w.title + L"\"");
                 g_hiddenWindows.erase(g_hiddenWindows.begin() + sel);
                 PopulateHiddenList(hDlg);
-                PopulateWindowList(hDlg);
+                TriggerWindowEnumeration();
                 UpdateSelectedInfo(hDlg);
             } else {
                 SetStatus(hDlg, L"Failed to show window.");
@@ -1101,7 +1123,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             break;
 
         case IDM_TRAY_EXIT:
-            KillTimer(hDlg, IDT_REFRESH);
+            KillTimer(hDlg, IDT_PREVIEW);
             RestoreAllHiddenWindows();
             DestroyTrayIcon();
             EndDialog(hDlg, 0);
@@ -1117,7 +1139,13 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
     // --------------------------------------------------------------------
     case WM_DESTROY:
-        if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = nullptr; }
+        // Signal all background threads not to post any more messages.
+        g_hDlg = nullptr;
+        // Wait up to 3 s for any running enumeration threads to finish before
+        // tearing down the critical section they depend on.
+        for (int i = 0; i < 300 && InterlockedCompareExchange(&g_activeEnumThreads, 0, 0) > 0; ++i)
+            Sleep(10);
+        DeleteCriticalSection(&g_pendingLock);
         if (g_hbrBg)            { DeleteObject(g_hbrBg);            g_hbrBg            = nullptr; }
         if (g_hFontBold)        { DeleteObject(g_hFontBold);        g_hFontBold        = nullptr; }
         if (g_hFontPlaceholder) { DeleteObject(g_hFontPlaceholder); g_hFontPlaceholder = nullptr; }
