@@ -30,6 +30,7 @@ target_link_libraries(window_mod PRIVATE
     psapi
     comctl32
     shell32
+    dwmapi
 )
 
 # Copy the injection DLL next to the exe after build.

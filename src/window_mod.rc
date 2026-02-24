@@ -2,37 +2,48 @@
 #include <winresrc.h>
 #include "resource.h"
 
-IDD_MAIN_DIALOG DIALOGEX 0, 0, 420, 310
+IDD_MAIN_DIALOG DIALOGEX 0, 0, 300, 400
+// Note: initial pixel size is set in WM_INITDIALOG (480 x 680); these dialog-unit
+// values are placeholder geometry that OnSize() overrides at runtime.
 STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME
 CAPTION "Window Modifier"
 FONT 9, "Segoe UI"
 BEGIN
-    // ---- Window list -------------------------------------------------------
-    LTEXT           "Windows:", -1, 7, 7, 40, 8
+    // ---- Preview section -------------------------------------------------------
+    LTEXT   "Preview",                        IDC_PREVIEW_LABEL,   7,   7, 200, 12
+    LTEXT   "How others will see your screen", IDC_PREVIEW_SUBTEXT, 7,  21, 200,  9
+    // SS_OWNERDRAW = 0x0000000D
+    CONTROL "", IDC_PREVIEW_STATIC, "Static", 0x0000000D,
+                7, 33, 286, 100
+    CONTROL "", IDC_TAB_SCREENS, "SysTabControl32",
+                WS_TABSTOP | WS_CLIPSIBLINGS,
+                7, 136, 286, 14
 
-    CONTROL         "", IDC_WINDOW_LIST, "SysListView32",
-                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
-                    WS_BORDER | WS_TABSTOP,
-                    7, 18, 406, 120
+    // ---- Hide applications section ---------------------------------------------
+    LTEXT   "Hide applications",            IDC_HIDE_APPS_LABEL, 7, 156, 200, 12
+    LTEXT   "Select the windows to hide",   IDC_HIDE_APPS_SUB,   7, 170, 200,  9
 
-    // ---- Selected window info ----------------------------------------------
-    LTEXT           "", IDC_SELECTED_INFO, 7, 142, 406, 8
+    CONTROL "", IDC_WINDOW_LIST, "SysListView32",
+                LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+                WS_BORDER | WS_TABSTOP,
+                7, 182, 286, 70
 
-    // ---- Operations --------------------------------------------------------
-    GROUPBOX        "Window Operations", IDC_GRP_OPS, 7, 153, 406, 36
+    // ---- Selected window info --------------------------------------------------
+    LTEXT   "", IDC_SELECTED_INFO, 7, 256, 286, 8
 
-    PUSHBUTTON      "Hide Window",       IDC_BTN_HIDE, 14, 166, 96, 14
+    // ---- Operations ------------------------------------------------------------
+    GROUPBOX "Operations", IDC_GRP_OPS, 7, 266, 286, 28
+    PUSHBUTTON "Hide Window",    IDC_BTN_HIDE,    14, 276,  82, 13
+    PUSHBUTTON "Toggle TopMost", IDC_BTN_TOPMOST, 100, 276, 82, 13
 
-    // ---- Hidden windows list -----------------------------------------------
-    LTEXT           "Hidden Windows:", IDC_GRP_HIDDEN, 7, 195, 80, 8
+    // ---- Hidden windows list --------------------------------------------------
+    LTEXT   "Hidden Windows:", IDC_GRP_HIDDEN, 7, 298, 80, 8
+    CONTROL "", IDC_HIDDEN_LIST, "SysListView32",
+                LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+                WS_BORDER | WS_TABSTOP,
+                7, 309, 286, 50
+    PUSHBUTTON "Show Selected", IDC_BTN_SHOW, 7, 363, 72, 13
 
-    CONTROL         "", IDC_HIDDEN_LIST, "SysListView32",
-                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
-                    WS_BORDER | WS_TABSTOP,
-                    7, 206, 406, 72
-
-    PUSHBUTTON      "Show Selected",   IDC_BTN_SHOW, 7, 282, 72, 14
-
-    // ---- Status bar --------------------------------------------------------
-    LTEXT           "Ready", IDC_STATUS_TEXT, 7, 298, 406, 8
+    // ---- Status bar -----------------------------------------------------------
+    LTEXT   "Ready", IDC_STATUS_TEXT, 7, 382, 286, 8
 END
