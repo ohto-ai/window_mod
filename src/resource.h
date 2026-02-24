@@ -21,6 +21,8 @@
 #define IDC_HIDE_APPS_LABEL     1064
 #define IDC_HIDE_APPS_SUB       1065
 #define IDC_BTN_TOPMOST         1066
+#define IDC_CHK_SHOW_CURSOR     1067
+#define IDC_PLACEHOLDER_LABEL   1068
 
 // Timers
 #define IDT_REFRESH             1

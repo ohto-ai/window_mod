@@ -78,26 +78,31 @@ static bool g_populatingList = false;
 static bool g_hasFocus = true;
 
 // Dark theme GDI resources
-static HBRUSH g_hbrBg    = nullptr;
-static HFONT  g_hFontBold = nullptr;
+static HBRUSH g_hbrBg            = nullptr;
+static HFONT  g_hFontBold        = nullptr;
+static HFONT  g_hFontPlaceholder = nullptr; // large font for the focus-lost screen
 
 // Tray icon
 static NOTIFYICONDATA g_nid       = {};
 static bool           g_trayAdded = false;
 
 // Low-level mouse hook – used to trigger list+preview refresh on mouse activity.
-static HHOOK g_mouseHook = nullptr;
+static HHOOK g_mouseHook        = nullptr;
+// Prevents the hook from resetting the debounce timer on every mouse event.
+static bool  g_refreshScheduled = false;
 
 // ============================================================================
 // Forward declarations
 // ============================================================================
 INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// Low-level mouse hook: debounce into a one-shot IDT_REFRESH timer.
+// Low-level mouse hook: schedule a one-shot IDT_REFRESH timer on the FIRST
+// mouse event after each refresh (subsequent events within the 300 ms window
+// are ignored so the timer is not constantly reset).
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION && g_hDlg && g_hasFocus) {
-        KillTimer(g_hDlg, IDT_REFRESH);
+    if (nCode == HC_ACTION && g_hDlg && g_hasFocus && !g_refreshScheduled) {
+        g_refreshScheduled = true;
         SetTimer(g_hDlg, IDT_REFRESH, 300, nullptr);
     }
     return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
@@ -179,6 +184,19 @@ static void CaptureMonitor(int idx)
     HBITMAP hBmp    = CreateCompatibleBitmap(hScreen, w, h);
     HGDIOBJ old     = SelectObject(hMem, hBmp);
     BitBlt(hMem, 0, 0, w, h, hScreen, mr.left, mr.top, SRCCOPY | CAPTUREBLT);
+
+    // Optionally overlay the mouse cursor on the captured bitmap.
+    if (g_hDlg && IsDlgButtonChecked(g_hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED) {
+        CURSORINFO ci = {};
+        ci.cbSize = sizeof(ci);
+        if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor) {
+            DrawIconEx(hMem,
+                ci.ptScreenPos.x - mr.left,
+                ci.ptScreenPos.y - mr.top,
+                ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
+        }
+    }
+
     SelectObject(hMem, old);
     DeleteDC(hMem);
     ReleaseDC(nullptr, hScreen);
@@ -268,8 +286,8 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
         lvi.iSubItem = 0;
         lvi.lParam   = static_cast<LPARAM>(i);
         lvi.pszText  = const_cast<LPWSTR>(w.title.c_str());
-        lvi.iImage   = imgIdx[i];
-        lvi.mask     = LVIF_TEXT | LVIF_PARAM | (imgIdx[i] >= 0 ? LVIF_IMAGE : 0);
+        lvi.iImage   = (imgIdx[i] >= 0) ? imgIdx[i] : I_IMAGENONE;
+        lvi.mask     = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE; // always set image to avoid defaulting to 0
         ListView_InsertItem(hList, &lvi);
 
         ListView_SetItemText(hList, i, 1,
@@ -306,21 +324,37 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 }
 
 // ---------------------------------------------------------------------------
-// Show a ":)" placeholder in the window list when the app loses focus.
+// All regular control IDs – used to show/hide them en masse.
+static const int s_allControls[] = {
+    IDC_PREVIEW_LABEL, IDC_PREVIEW_SUBTEXT, IDC_PREVIEW_STATIC, IDC_TAB_SCREENS,
+    IDC_HIDE_APPS_LABEL, IDC_HIDE_APPS_SUB, IDC_WINDOW_LIST, IDC_SELECTED_INFO,
+    IDC_GRP_OPS, IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_GRP_HIDDEN, IDC_HIDDEN_LIST,
+    IDC_BTN_SHOW, IDC_STATUS_TEXT, IDC_CHK_SHOW_CURSOR,
+};
 
+// Show a full-page ":)" placeholder when the app loses focus.
 static void ShowPlaceholder(HWND hDlg)
 {
-    HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-    ListView_DeleteAllItems(hList);
     g_windows.clear();
+    for (int id : s_allControls)
+        if (HWND h = GetDlgItem(hDlg, id))
+            ShowWindow(h, SW_HIDE);
 
-    LVITEMW lvi = {};
-    lvi.mask    = LVIF_TEXT;
-    lvi.iItem   = 0;
-    lvi.pszText = const_cast<LPWSTR>(L":)");
-    ListView_InsertItem(hList, &lvi);
+    HWND hPh = GetDlgItem(hDlg, IDC_PLACEHOLDER_LABEL);
+    RECT rc;
+    GetClientRect(hDlg, &rc);
+    MoveWindow(hPh, rc.left, rc.top, rc.right, rc.bottom, FALSE);
+    ShowWindow(hPh, SW_SHOW);
+    InvalidateRect(hDlg, nullptr, TRUE);
+}
 
-    SetDlgItemTextW(hDlg, IDC_SELECTED_INFO, L"Selected: (none)");
+// Restore all regular controls (called when the app regains focus).
+static void HidePlaceholder(HWND hDlg)
+{
+    ShowWindow(GetDlgItem(hDlg, IDC_PLACEHOLDER_LABEL), SW_HIDE);
+    for (int id : s_allControls)
+        if (HWND h = GetDlgItem(hDlg, id))
+            ShowWindow(h, SW_SHOW);
 }
 
 // ---------------------------------------------------------------------------
@@ -482,8 +516,10 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
             MoveWindow(hCtrl, x, cy2, cw, ch, FALSE);
     };
 
-    // Preview section
-    Move(IDC_PREVIEW_LABEL,   mX, prevLblY, listW, bigH);
+    // Preview section – label on the left, cursor checkbox on the right
+    static const int chkW = 140;
+    Move(IDC_PREVIEW_LABEL,   mX, prevLblY, listW - chkW - 4, bigH);
+    Move(IDC_CHK_SHOW_CURSOR, mX + listW - chkW, prevLblY, chkW, bigH);
     Move(IDC_PREVIEW_SUBTEXT, mX, prevSubY, listW, subH);
     Move(IDC_PREVIEW_STATIC,  mX, previewY, listW, previewH);
     Move(IDC_TAB_SCREENS,     mX, tabY,     listW, 22);
@@ -515,6 +551,10 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
 
     // Status bar
     Move(IDC_STATUS_TEXT, mX, statusY, listW, statusH);
+
+    // Placeholder: always fill the entire client area (it is hidden when focused).
+    if (HWND hPh = GetDlgItem(hDlg, IDC_PLACEHOLDER_LABEL))
+        MoveWindow(hPh, 0, 0, W, H, FALSE);
 
     InvalidateRect(hDlg, nullptr, TRUE);
 }
@@ -555,6 +595,17 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             SendDlgItemMessageW(hDlg, IDC_HIDE_APPS_LABEL,
                 WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontBold), FALSE);
         }
+
+                // Large font for the full-page focus-lost placeholder (72 px ≈ 54 pt at 96 dpi)
+        static const int PLACEHOLDER_FONT_HEIGHT = -72;
+        g_hFontPlaceholder = CreateFontW(PLACEHOLDER_FONT_HEIGHT, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        if (g_hFontPlaceholder)
+            SendDlgItemMessageW(hDlg, IDC_PLACEHOLDER_LABEL,
+                WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontPlaceholder), FALSE);
+        // Ensure placeholder starts hidden
+        ShowWindow(GetDlgItem(hDlg, IDC_PLACEHOLDER_LABEL), SW_HIDE);
 
         // Centre the dialog (portrait aspect ratio)
         {
@@ -646,6 +697,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         if (LOWORD(wParam) == WA_INACTIVE) {
             g_hasFocus = false;
+            g_refreshScheduled = false;
             KillTimer(hDlg, IDT_REFRESH); // cancel any pending debounce
             // Release the last capture so the process is not held
             if (g_previewBmp) {
@@ -653,10 +705,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_previewBmp = nullptr;
             }
             ShowPlaceholder(hDlg);
-            if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
-                InvalidateRect(hPrev, nullptr, FALSE);
         } else {
             g_hasFocus = true;
+            HidePlaceholder(hDlg);
             CaptureMonitor(g_currentMonitor);
             PopulateWindowList(hDlg);
             UpdateSelectedInfo(hDlg);
@@ -673,6 +724,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_TIMER:
         if (wParam == IDT_REFRESH) {
             if (g_mouseHook) KillTimer(hDlg, IDT_REFRESH); // one-shot when hook active
+            g_refreshScheduled = false; // allow the next mouse event to schedule again
             PopulateWindowList(hDlg, true);
             UpdateSelectedInfo(hDlg);
             CaptureMonitor(g_currentMonitor);
@@ -1066,9 +1118,10 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------------
     case WM_DESTROY:
         if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = nullptr; }
-        if (g_hbrBg)     { DeleteObject(g_hbrBg);     g_hbrBg     = nullptr; }
-        if (g_hFontBold) { DeleteObject(g_hFontBold); g_hFontBold = nullptr; }
-        if (g_previewBmp){ DeleteObject(g_previewBmp); g_previewBmp = nullptr; }
+        if (g_hbrBg)            { DeleteObject(g_hbrBg);            g_hbrBg            = nullptr; }
+        if (g_hFontBold)        { DeleteObject(g_hFontBold);        g_hFontBold        = nullptr; }
+        if (g_hFontPlaceholder) { DeleteObject(g_hFontPlaceholder); g_hFontPlaceholder = nullptr; }
+        if (g_previewBmp)       { DeleteObject(g_previewBmp);       g_previewBmp       = nullptr; }
         // Release the image list attached to the window list view.
         if (HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST)) {
             HIMAGELIST hImgList = ListView_GetImageList(hList, LVSIL_SMALL);
