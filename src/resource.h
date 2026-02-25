@@ -49,3 +49,11 @@
 #define IDM_TRAY_SHOW           2001
 #define IDM_TRAY_EXIT           2002
 #define IDM_TRAY_AUTOSTART      2003
+
+// Window list context menu
+#define IDM_CTX_HIDE_WINDOW     3001
+#define IDM_CTX_SHOW_WINDOW     3002
+#define IDM_CTX_TOPMOST         3003
+#define IDM_CTX_EXCLUDE         3004
+#define IDM_CTX_WATCH           3005
+#define IDM_CTX_UNLOAD_DLL      3006

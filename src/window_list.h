@@ -9,7 +9,8 @@ struct WindowInfo {
     std::wstring title;
     std::wstring processName;
     DWORD       pid;
-    HICON       hIcon; // small icon, nullptr if none
+    HICON       hIcon;     // small icon, nullptr if none
+    bool        isHidden = false; // true when we've hidden this window
 };
 
 /// Return a snapshot of all visible top-level windows that have a title.
