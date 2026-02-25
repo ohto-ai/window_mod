@@ -10,10 +10,18 @@
 #define WDA_SHARED_MEM_NAME  L"Local\\WdaInjectHwnd_WindowMod"
 
 // Layout of the shared-memory block (must match dllmain.cpp).
+// IMPORTANT: Use fixed-width types so the struct has identical layout when
+// read by a 32-bit DLL and written by a 64-bit process (or vice versa).
+// HWND is 4 bytes in 32-bit builds and 8 bytes in 64-bit builds, which would
+// shift the 'affinity' field and cause the 32-bit DLL to read the wrong value.
+// All Windows HWNDs fit in 32 bits (the upper 32 bits are always zero), so
+// storing as UINT64 gives a stable 8-byte field in both ABI variants.
+#pragma pack(push, 1)
 struct WdaSharedData {
-    HWND  hwnd;
-    DWORD affinity;
+    UINT64 hwnd;     // HWND stored as fixed 64-bit; upper 32 bits = 0
+    DWORD  affinity;
 };
+#pragma pack(pop)
 
 // ---------------------------------------------------------------------------
 // Narrow (UTF-8) representation of a wide string – used for spdlog messages.
@@ -65,7 +73,7 @@ static HANDLE CreateSharedData(HWND hwnd, DWORD affinity)
         return INVALID_HANDLE_VALUE;
     }
     auto* pData = reinterpret_cast<WdaSharedData*>(pView);
-    pData->hwnd     = hwnd;
+    pData->hwnd     = reinterpret_cast<UINT64>(hwnd);
     pData->affinity = affinity;
     UnmapViewOfFile(pView);
     return hMap;

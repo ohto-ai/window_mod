@@ -24,10 +24,14 @@
 #endif
 
 // Layout of the shared-memory block (must match src/injector.cpp).
+// Use fixed-width UINT64 for the HWND field so the struct has identical layout
+// in 32-bit and 64-bit builds (HWND is 4 bytes in 32-bit, 8 in 64-bit).
+#pragma pack(push, 1)
 struct WdaSharedData {
-    HWND  hwnd;
-    DWORD affinity;
+    UINT64 hwnd;     // HWND stored as fixed 64-bit; upper 32 bits = 0
+    DWORD  affinity;
 };
+#pragma pack(pop)
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReason, LPVOID /*lpReserved*/)
 {
@@ -51,7 +55,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReason, LPVOID /*lpReserved*/)
     }
 
     const auto* pData = reinterpret_cast<const WdaSharedData*>(pView);
-    HWND  hwnd     = pData->hwnd;
+    HWND  hwnd     = reinterpret_cast<HWND>(static_cast<UINT_PTR>(pData->hwnd));
     DWORD affinity = pData->affinity;
     UnmapViewOfFile(pView);
     CloseHandle(hMap);
