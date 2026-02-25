@@ -33,8 +33,10 @@ BEGIN
 
     // ---- Operations ------------------------------------------------------------
     GROUPBOX "Operations", IDC_GRP_OPS, 7, 266, 286, 28
-    PUSHBUTTON "Hide Window",    IDC_BTN_HIDE,    14, 276,  82, 13
-    PUSHBUTTON "Toggle TopMost", IDC_BTN_TOPMOST, 100, 276, 82, 13
+    PUSHBUTTON "Hide Window",    IDC_BTN_HIDE,       14, 276,  82, 13
+    PUSHBUTTON "Toggle TopMost", IDC_BTN_TOPMOST,   100, 276,  82, 13
+    PUSHBUTTON "Unload DLL",     IDC_BTN_UNLOAD_DLL, 186, 276,  82, 13
+    AUTOCHECKBOX "Auto-unload DLL", IDC_CHK_AUTO_UNLOAD, 14, 290, 120, 12
 
     // ---- Hidden windows list --------------------------------------------------
     LTEXT   "Hidden Windows:", IDC_GRP_HIDDEN, 7, 298, 80, 8

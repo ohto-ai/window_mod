@@ -37,6 +37,15 @@ static bool FileExists(const std::wstring& path)
 }
 
 // ---------------------------------------------------------------------------
+// Return the directory that contains the running executable (no trailing backslash).
+static std::filesystem::path ExeDir()
+{
+    wchar_t buf[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    return std::filesystem::path(buf).parent_path();
+}
+
+// ---------------------------------------------------------------------------
 // Helper: create a shared-memory object and write the payload.
 // Returns INVALID_HANDLE_VALUE on failure.
 static HANDLE CreateSharedData(HWND hwnd, DWORD affinity)
@@ -63,12 +72,11 @@ static HANDLE CreateSharedData(HWND hwnd, DWORD affinity)
 }
 
 // ---------------------------------------------------------------------------
-// Helper: scan target process module list for our DLL (case-insensitive on
-// the filename part only) and return its remote HMODULE, or nullptr.
+// Helper: scan target process module list for a DLL (case-insensitive filename
+// match) and return its remote HMODULE, or nullptr.
 // Requires hProcess to have PROCESS_QUERY_INFORMATION | PROCESS_VM_READ.
 static HMODULE FindRemoteDll(HANDLE hProcess, const std::wstring& dllFilename)
 {
-    // First call to get required buffer size, then allocate dynamically.
     DWORD needed = 0;
     EnumProcessModules(hProcess, nullptr, 0, &needed);
     if (!needed) return nullptr;
@@ -98,10 +106,6 @@ static HMODULE FindRemoteDll(HANDLE hProcess, const std::wstring& dllFilename)
 
 // ---------------------------------------------------------------------------
 // Helper: inject a FreeLibrary call into the target process to unload hMod.
-// DllMain(DLL_PROCESS_DETACH) will run in the target as the refcount reaches
-// zero, which is harmless for our inject DLL. After this, a fresh LoadLibrary
-// will trigger DllMain(DLL_PROCESS_ATTACH) again with the new shared-memory
-// payload.
 static void RemoteFreeLibrary(HANDLE hProcess, HMODULE hMod)
 {
     HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
@@ -119,94 +123,189 @@ static void RemoteFreeLibrary(HANDLE hProcess, HMODULE hMod)
 }
 
 // ---------------------------------------------------------------------------
-// Helper: check whether the current process and the target process have the
-// same CPU architecture (both native 64-bit, or both 32-bit).
-// Returns true when they are compatible; false (and sets LastError to
-// ERROR_EXE_MACHINE_TYPE_MISMATCH) when they differ.
-static bool CheckArchitectureMatch(HANDLE hProcess, DWORD pid)
+// Helper: returns true when the target process is a different CPU bitness from
+// the current process.
+static bool IsArchMismatch(HANDLE hProcess)
 {
 #ifdef _WIN64
-    // We are a native 64-bit process.
-    // A WOW64 (32-bit) target is incompatible: a 64-bit DLL cannot be loaded
-    // into a 32-bit process and CreateRemoteThread with a 64-bit address fails.
     BOOL targetIsWow64 = FALSE;
-    if (IsWow64Process(hProcess, &targetIsWow64) && targetIsWow64) {
-        spdlog::error(
-            "InjectWDASetAffinity: architecture mismatch for PID {}. "
-            "The injector is 64-bit but the target process is 32-bit (WOW64). "
-            "Use the 32-bit (x86) build of window_mod to inject into 32-bit targets.",
-            pid);
-        SetLastError(ERROR_EXE_MACHINE_TYPE_MISMATCH);
-        return false;
-    }
+    IsWow64Process(hProcess, &targetIsWow64);
+    return (targetIsWow64 != FALSE);
 #else
-    // We are a 32-bit process.  On a 64-bit OS we run under WOW64.
-    // A native 64-bit target is incompatible for the same reason.
-    BOOL selfIsWow64   = FALSE;
+    // 32-bit process on a 64-bit OS runs under WOW64.
+    BOOL selfIsWow64 = FALSE;
     BOOL targetIsWow64 = FALSE;
     IsWow64Process(GetCurrentProcess(), &selfIsWow64);
     IsWow64Process(hProcess, &targetIsWow64);
-    if (selfIsWow64 && !targetIsWow64) {
-        spdlog::error(
-            "InjectWDASetAffinity: architecture mismatch for PID {}. "
-            "The injector is 32-bit (WOW64) but the target process is native 64-bit. "
-            "Use the 64-bit (x64) build of window_mod to inject into 64-bit targets.",
-            pid);
-        SetLastError(ERROR_EXE_MACHINE_TYPE_MISMATCH);
+    // Mismatch = we are WOW64 (32-bit on 64-bit OS) and target is NOT WOW64 (native 64-bit).
+    return (selfIsWow64 && !targetIsWow64);
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Helper: inject dllPath into hProcess using a remote LoadLibraryW thread.
+// Returns the HMODULE exit code (non-zero = success), or 0 on failure.
+static DWORD RemoteLoadLibrary(HANDLE hProcess, const std::wstring& dllPath, DWORD pid)
+{
+    const size_t pathBytes = (dllPath.size() + 1) * sizeof(wchar_t);
+
+    LPVOID pRemote = VirtualAllocEx(hProcess, nullptr, pathBytes,
+                                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pRemote) {
+        spdlog::error("RemoteLoadLibrary: VirtualAllocEx failed for PID {} (error {})",
+                      pid, GetLastError());
+        return 0;
+    }
+
+    if (!WriteProcessMemory(hProcess, pRemote, dllPath.c_str(), pathBytes, nullptr)) {
+        spdlog::error("RemoteLoadLibrary: WriteProcessMemory failed for PID {} (error {})",
+                      pid, GetLastError());
+        VirtualFreeEx(hProcess, pRemote, 0, MEM_RELEASE);
+        return 0;
+    }
+
+    HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
+    if (!hK32) {
+        VirtualFreeEx(hProcess, pRemote, 0, MEM_RELEASE);
+        return 0;
+    }
+    auto pfnLoadLib = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+        GetProcAddress(hK32, "LoadLibraryW"));
+
+    HANDLE hThread = CreateRemoteThread(hProcess, nullptr, 0,
+                                        pfnLoadLib, pRemote, 0, nullptr);
+    if (!hThread) {
+        spdlog::error("RemoteLoadLibrary: CreateRemoteThread failed for PID {} (error {})",
+                      pid, GetLastError());
+        VirtualFreeEx(hProcess, pRemote, 0, MEM_RELEASE);
+        return 0;
+    }
+
+    spdlog::debug("RemoteLoadLibrary: remote thread created for PID {}; waiting...", pid);
+    DWORD waitRes = WaitForSingleObject(hThread, 8000);
+    if (waitRes != WAIT_OBJECT_0)
+        spdlog::warn("RemoteLoadLibrary: wait returned {} for PID {}", waitRes, pid);
+
+    DWORD exitCode = 0;
+    GetExitCodeThread(hThread, &exitCode);
+    CloseHandle(hThread);
+    VirtualFreeEx(hProcess, pRemote, 0, MEM_RELEASE);
+    return exitCode;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: spawn the opposite-arch launcher to inject dllPath into pid.
+// The shared memory is already set up by the caller.
+// Returns true on success.
+static bool SpawnLauncherForPid(DWORD pid, const std::wstring& dllPath)
+{
+#ifdef _WIN64
+    const wchar_t* launcherName = L"wda_launcher_x86.exe";
+#else
+    const wchar_t* launcherName = L"wda_launcher_x64.exe";
+#endif
+
+    std::wstring launcherPath = (ExeDir() / launcherName).wstring();
+    if (!FileExists(launcherPath)) {
+        spdlog::error("SpawnLauncher: opposite-arch launcher not found at {}",
+                      WtoU8(launcherPath));
+        SetLastError(ERROR_FILE_NOT_FOUND);
         return false;
     }
-#endif
+
+    // Build command line: "<launcher>" <pid> "<dll_path>"
+    std::wstring cmdLine = L"\"" + launcherPath + L"\" "
+                         + std::to_wstring(pid)
+                         + L" \"" + dllPath + L"\"";
+
+    spdlog::debug("SpawnLauncher: cmd = {}", WtoU8(cmdLine));
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+
+    if (!CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr,
+                        FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        spdlog::error("SpawnLauncher: CreateProcessW failed (error {})", GetLastError());
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, 12000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (exitCode != 0) {
+        spdlog::error("SpawnLauncher: launcher exited with code {} for PID {}", exitCode, pid);
+        return false;
+    }
+    spdlog::debug("SpawnLauncher: launcher succeeded for PID {}", pid);
     return true;
 }
 
 // ---------------------------------------------------------------------------
-bool InjectWDASetAffinity(HWND hwnd, DWORD affinity)
+bool InjectWDASetAffinity(HWND hwnd, DWORD affinity, bool autoUnload)
 {
     if (!hwnd || !IsWindow(hwnd)) {
         spdlog::warn("InjectWDASetAffinity: invalid HWND {:#x}", reinterpret_cast<uintptr_t>(hwnd));
         return false;
     }
 
-    spdlog::info("InjectWDASetAffinity: hwnd={:#x}, affinity={:#x}",
-                 reinterpret_cast<uintptr_t>(hwnd), affinity);
+    spdlog::info("InjectWDASetAffinity: hwnd={:#x}, affinity={:#x}, autoUnload={}",
+                 reinterpret_cast<uintptr_t>(hwnd), affinity, autoUnload);
 
-    // --- 1. Determine DLL path (same directory as the running executable) ---
-    wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    // --- 1. Resolve DLL paths -------------------------------------------------
+    std::filesystem::path exeDir = ExeDir();
 
-    std::filesystem::path dllFsPath =
-        std::filesystem::path(exePath).parent_path() / L"wda_inject.dll";
-    std::wstring dllPath = dllFsPath.wstring();
+    // Same-arch DLL (used when architectures match).
+#ifdef _WIN64
+    const wchar_t* sameDllName = L"wda_inject_x64.dll";
+    const wchar_t* oppDllName  = L"wda_inject_x86.dll";
+#else
+    const wchar_t* sameDllName = L"wda_inject_x86.dll";
+    const wchar_t* oppDllName  = L"wda_inject_x64.dll";
+#endif
 
-    spdlog::debug("InjectWDASetAffinity: DLL path = {}", WtoU8(dllPath));
+    // Fall back to the legacy name "wda_inject.dll" if the arch-named file is absent.
+    std::wstring sameDllPath = (exeDir / sameDllName).wstring();
+    if (!FileExists(sameDllPath))
+        sameDllPath = (exeDir / L"wda_inject.dll").wstring();
 
-    if (!FileExists(dllPath)) {
-        spdlog::error("InjectWDASetAffinity: DLL not found at {}", WtoU8(dllPath));
+    std::wstring oppDllPath = (exeDir / oppDllName).wstring();
+
+    spdlog::debug("InjectWDASetAffinity: same-arch DLL = {}", WtoU8(sameDllPath));
+
+    if (!FileExists(sameDllPath)) {
+        spdlog::error("InjectWDASetAffinity: same-arch DLL not found at {}",
+                      WtoU8(sameDllPath));
         SetLastError(ERROR_FILE_NOT_FOUND);
         return false;
     }
 
-    // --- 2. Put the target HWND + affinity in named shared memory ----------
+    // --- 2. Write shared memory (HWND + affinity) ----------------------------
     HANDLE hMap = CreateSharedData(hwnd, affinity);
     if (hMap == INVALID_HANDLE_VALUE) {
-        spdlog::error("InjectWDASetAffinity: CreateSharedData failed (error {})", GetLastError());
+        spdlog::error("InjectWDASetAffinity: CreateSharedData failed (error {})",
+                      GetLastError());
         return false;
     }
 
     bool success = false;
 
     do {
-        // --- 3. Open target process with the rights needed for injection ---
+        // --- 3. Identify target process --------------------------------------
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
         if (!pid) {
-            spdlog::error("InjectWDASetAffinity: GetWindowThreadProcessId returned pid=0 (error {})",
+            spdlog::error("InjectWDASetAffinity: GetWindowThreadProcessId returned 0 (error {})",
                           GetLastError());
             break;
         }
 
         spdlog::info("InjectWDASetAffinity: target PID = {}", pid);
 
+        // --- 4. Open target process ------------------------------------------
         HANDLE hProcess = OpenProcess(
             PROCESS_CREATE_THREAD |
             PROCESS_QUERY_INFORMATION |
@@ -221,115 +320,119 @@ bool InjectWDASetAffinity(HWND hwnd, DWORD affinity)
         }
 
         do {
-            // --- 4. Check for CPU architecture mismatch (32-bit vs 64-bit) -
-            if (!CheckArchitectureMatch(hProcess, pid))
-                break;
+            // --- 5. Detect architecture mismatch ----------------------------
+            bool archMismatch = IsArchMismatch(hProcess);
 
-            // --- 5. If the DLL is already loaded, FreeLibrary it first so
-            //        the upcoming LoadLibraryW triggers a fresh DllMain. ---
-            HMODULE hRemote = FindRemoteDll(hProcess,
-                                            dllFsPath.filename().wstring());
-            if (hRemote) {
-                spdlog::debug("InjectWDASetAffinity: DLL already loaded in PID {}; unloading first", pid);
-                RemoteFreeLibrary(hProcess, hRemote);
+            if (archMismatch) {
+#ifdef _WIN64
+                spdlog::info("InjectWDASetAffinity: PID {} is 32-bit (WOW64); "
+                             "using opposite-arch launcher + x86 DLL.", pid);
+#else
+                spdlog::info("InjectWDASetAffinity: PID {} is native 64-bit; "
+                             "using opposite-arch launcher + x64 DLL.", pid);
+#endif
+                // Verify the opposite-arch DLL exists.
+                if (!FileExists(oppDllPath)) {
+                    spdlog::error("InjectWDASetAffinity: opposite-arch DLL not found at {}",
+                                  WtoU8(oppDllPath));
+                    SetLastError(ERROR_FILE_NOT_FOUND);
+                    break;
+                }
+
+                // Spawn the opposite-arch launcher which will LoadLibrary the
+                // opposite-arch DLL into the target process.
+                // Shared memory (with HWND + affinity) is already populated.
+                success = SpawnLauncherForPid(pid, oppDllPath);
+                if (!success) break;
+
+                // For auto-unload of the opposite-arch DLL we would need the
+                // opposite-arch launcher again (FreeLibrary path); leave for a
+                // future enhancement – the DLL is very small and transient.
+                // Skip the affinity verification below if the launcher succeeded.
+                // (The launcher doesn't support verification natively; we rely
+                //  on the DLL having run DllMain successfully.)
+
+                // Best-effort affinity check from this side.
+                typedef BOOL(WINAPI* PFN_GWDA)(HWND, DWORD*);
+                static PFN_GWDA pfnGetWDA2 = reinterpret_cast<PFN_GWDA>(
+                    GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                                   "GetWindowDisplayAffinity"));
+                if (pfnGetWDA2) {
+                    DWORD actual = 0xFFFFFFFF;
+                    if (pfnGetWDA2(hwnd, &actual)) {
+                        success = (actual == affinity);
+                        if (success)
+                            spdlog::info("InjectWDASetAffinity: verified (cross-arch) – "
+                                         "affinity is now {:#x}", actual);
+                        else
+                            spdlog::error("InjectWDASetAffinity: cross-arch affinity mismatch: "
+                                          "expected {:#x}, got {:#x}", affinity, actual);
+                    }
+                }
+                break; // finished cross-arch path
             }
 
-            // --- 6. Write the DLL path into the target process memory -----
-            const size_t pathBytes = (dllPath.size() + 1) * sizeof(wchar_t);
-            LPVOID pRemote = VirtualAllocEx(
-                hProcess, nullptr, pathBytes,
-                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if (!pRemote) {
-                spdlog::error("InjectWDASetAffinity: VirtualAllocEx failed for PID {} (error {})",
-                              pid, GetLastError());
-                break;
+            // --- 6. Same-arch path: unload stale copy, then inject ----------
+
+            // Unload any previously loaded copy of either DLL variant so the
+            // upcoming LoadLibraryW triggers a fresh DllMain.
+            for (const wchar_t* n : { sameDllName, L"wda_inject.dll" }) {
+                HMODULE hRemote = FindRemoteDll(hProcess, n);
+                if (hRemote) {
+                    spdlog::debug("InjectWDASetAffinity: unloading stale '{}' from PID {}",
+                                  WtoU8(n), pid);
+                    RemoteFreeLibrary(hProcess, hRemote);
+                }
             }
 
-            if (!WriteProcessMemory(hProcess, pRemote,
-                                    dllPath.c_str(), pathBytes, nullptr)) {
-                spdlog::error("InjectWDASetAffinity: WriteProcessMemory failed for PID {} (error {})",
-                              pid, GetLastError());
-                VirtualFreeEx(hProcess, pRemote, 0, MEM_RELEASE);
-                break;
-            }
-
-            // --- 7. Spawn a remote thread that calls LoadLibraryW ----------
-            HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
-            if (!hK32) {
-                spdlog::error("InjectWDASetAffinity: GetModuleHandleW(kernel32.dll) failed (error {})",
-                              GetLastError());
-                VirtualFreeEx(hProcess, pRemote, 0, MEM_RELEASE);
-                break;
-            }
-            auto pfnLoadLib = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-                GetProcAddress(hK32, "LoadLibraryW"));
-
-            HANDLE hThread = CreateRemoteThread(
-                hProcess, nullptr, 0,
-                pfnLoadLib, pRemote,
-                0, nullptr);
-
-            if (!hThread) {
-                spdlog::error("InjectWDASetAffinity: CreateRemoteThread failed for PID {} (error {})",
-                              pid, GetLastError());
-                VirtualFreeEx(hProcess, pRemote, 0, MEM_RELEASE);
-                break;
-            }
-
-            spdlog::debug("InjectWDASetAffinity: remote thread created for PID {}; waiting…", pid);
-
-            // Wait up to 8 seconds for DllMain to finish.
-            DWORD waitResult = WaitForSingleObject(hThread, 8000);
-            if (waitResult != WAIT_OBJECT_0) {
-                spdlog::warn("InjectWDASetAffinity: remote thread wait returned {} for PID {}",
-                             waitResult, pid);
-            }
-
-            // Check that LoadLibraryW succeeded (non-zero HMODULE as exit code).
-            DWORD exitCode = 0;
-            GetExitCodeThread(hThread, &exitCode);
-            CloseHandle(hThread);
-            VirtualFreeEx(hProcess, pRemote, 0, MEM_RELEASE);
-
+            // --- 7. Load the same-arch DLL in the target process ------------
+            DWORD exitCode = RemoteLoadLibrary(hProcess, sameDllPath, pid);
             if (exitCode == 0) {
-                spdlog::error("InjectWDASetAffinity: LoadLibraryW returned NULL in PID {} – "
-                              "DLL failed to load (architecture mismatch, missing dependency, "
-                              "or anti-cheat/AV blocked the injection).",
-                              pid);
+                spdlog::error("InjectWDASetAffinity: LoadLibraryW returned NULL in PID {} "
+                              "(missing dependency, AV blocked injection?)", pid);
                 break;
             }
 
-            spdlog::debug("InjectWDASetAffinity: DLL loaded in PID {} (HMODULE={:#x})", pid, exitCode);
+            spdlog::debug("InjectWDASetAffinity: DLL loaded in PID {} (HMODULE={:#x})",
+                          pid, exitCode);
 
-            // --- 8. Verify via GetWindowDisplayAffinity that the API call
-            //        inside the DLL actually succeeded. ----------------------
+            // --- 8. Verify affinity ------------------------------------------
             typedef BOOL(WINAPI* PFN_GWDA)(HWND, DWORD*);
             static PFN_GWDA pfnGetWDA = reinterpret_cast<PFN_GWDA>(
-                GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetWindowDisplayAffinity"));
+                GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                               "GetWindowDisplayAffinity"));
 
             if (pfnGetWDA) {
-                DWORD actualAffinity = 0xFFFFFFFF;
-                if (pfnGetWDA(hwnd, &actualAffinity)) {
-                    success = (actualAffinity == affinity);
-                    if (success) {
-                        spdlog::info("InjectWDASetAffinity: verified – affinity is now {:#x}", actualAffinity);
-                    } else {
-                        spdlog::error("InjectWDASetAffinity: DLL loaded but affinity mismatch "
-                                      "for HWND {:#x}: expected {:#x}, got {:#x} – "
-                                      "SetWindowDisplayAffinity may have failed inside the target process.",
-                                      reinterpret_cast<uintptr_t>(hwnd), affinity, actualAffinity);
-                    }
+                DWORD actual = 0xFFFFFFFF;
+                if (pfnGetWDA(hwnd, &actual)) {
+                    success = (actual == affinity);
+                    if (success)
+                        spdlog::info("InjectWDASetAffinity: verified – affinity is now {:#x}",
+                                     actual);
+                    else
+                        spdlog::error("InjectWDASetAffinity: affinity mismatch: "
+                                      "expected {:#x}, got {:#x} – "
+                                      "SetWindowDisplayAffinity may have failed inside target.",
+                                      affinity, actual);
                 } else {
-                    // GetWindowDisplayAffinity failed; fall back to trusting the exit code.
-                    spdlog::warn("InjectWDASetAffinity: GetWindowDisplayAffinity failed (error {}); "
-                                 "assuming success based on DLL load.",
-                                 GetLastError());
+                    spdlog::warn("InjectWDASetAffinity: GetWindowDisplayAffinity failed "
+                                 "(error {}); assuming success.", GetLastError());
                     success = true;
                 }
             } else {
-                // API not available (pre-Win7?); trust the exit code.
-                success = true;
+                success = true; // API not available; trust exit code
             }
+
+            // --- 9. Auto-unload the DLL if requested -------------------------
+            if (autoUnload) {
+                HMODULE hRemote = FindRemoteDll(hProcess, sameDllName);
+                if (!hRemote) hRemote = FindRemoteDll(hProcess, L"wda_inject.dll");
+                if (hRemote) {
+                    spdlog::debug("InjectWDASetAffinity: auto-unloading DLL from PID {}", pid);
+                    RemoteFreeLibrary(hProcess, hRemote);
+                }
+            }
+
         } while (false);
 
         CloseHandle(hProcess);
@@ -338,9 +441,67 @@ bool InjectWDASetAffinity(HWND hwnd, DWORD affinity)
     CloseHandle(hMap);
 
     if (success)
-        spdlog::info("InjectWDASetAffinity: SUCCESS for HWND {:#x}", reinterpret_cast<uintptr_t>(hwnd));
+        spdlog::info("InjectWDASetAffinity: SUCCESS for HWND {:#x}",
+                     reinterpret_cast<uintptr_t>(hwnd));
     else
-        spdlog::error("InjectWDASetAffinity: FAILED for HWND {:#x}", reinterpret_cast<uintptr_t>(hwnd));
+        spdlog::error("InjectWDASetAffinity: FAILED for HWND {:#x}",
+                      reinterpret_cast<uintptr_t>(hwnd));
 
     return success;
+}
+
+// ---------------------------------------------------------------------------
+bool UnloadInjectedDll(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd)) {
+        spdlog::warn("UnloadInjectedDll: invalid HWND {:#x}",
+                     reinterpret_cast<uintptr_t>(hwnd));
+        return false;
+    }
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!pid) {
+        spdlog::error("UnloadInjectedDll: GetWindowThreadProcessId returned 0 (error {})",
+                      GetLastError());
+        return false;
+    }
+
+    spdlog::info("UnloadInjectedDll: hwnd={:#x}, PID={}",
+                 reinterpret_cast<uintptr_t>(hwnd), pid);
+
+    HANDLE hProcess = OpenProcess(
+        PROCESS_CREATE_THREAD |
+        PROCESS_QUERY_INFORMATION |
+        PROCESS_VM_OPERATION |
+        PROCESS_VM_READ,
+        FALSE, pid);
+    if (!hProcess) {
+        spdlog::error("UnloadInjectedDll: OpenProcess failed for PID {} (error {})",
+                      pid, GetLastError());
+        return false;
+    }
+
+    bool found = false;
+    // Try all known DLL names (arch-named and legacy).
+    for (const wchar_t* name : { L"wda_inject_x64.dll", L"wda_inject_x86.dll",
+                                  L"wda_inject.dll" })
+    {
+        HMODULE hMod = FindRemoteDll(hProcess, name);
+        if (hMod) {
+            spdlog::debug("UnloadInjectedDll: found '{}' in PID {}; unloading...",
+                          WtoU8(name), pid);
+            RemoteFreeLibrary(hProcess, hMod);
+            found = true;
+        }
+    }
+
+    CloseHandle(hProcess);
+
+    if (found)
+        spdlog::info("UnloadInjectedDll: unloaded DLL(s) from PID {}", pid);
+    else
+        spdlog::debug("UnloadInjectedDll: no wda_inject DLL found in PID {}", pid);
+
+    return true; // "success" means the operation ran, even if DLL was already absent
 }

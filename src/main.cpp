@@ -155,6 +155,9 @@ static bool g_hasFocus = true;
 // Whether the desktop preview is shown (mirrors IDC_CHK_SHOW_PREVIEW)
 static bool g_showDesktopPreview = true;
 
+// Whether to auto-unload the DLL after each injection (mirrors IDC_CHK_AUTO_UNLOAD)
+static bool g_autoUnloadDll = true;
+
 // Dark theme GDI resources
 static HBRUSH g_hbrBg            = nullptr;
 static HFONT  g_hFontBold        = nullptr;
@@ -514,7 +517,8 @@ static const int s_allControls[] = {
     IDC_PREVIEW_LABEL, IDC_PREVIEW_SUBTEXT, IDC_PREVIEW_STATIC, IDC_TAB_SCREENS,
     IDC_CHK_SHOW_PREVIEW,
     IDC_HIDE_APPS_LABEL, IDC_HIDE_APPS_SUB, IDC_WINDOW_LIST, IDC_SELECTED_INFO,
-    IDC_GRP_OPS, IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_GRP_HIDDEN, IDC_HIDDEN_LIST,
+    IDC_GRP_OPS, IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_UNLOAD_DLL, IDC_CHK_AUTO_UNLOAD,
+    IDC_GRP_HIDDEN, IDC_HIDDEN_LIST,
     IDC_BTN_SHOW, IDC_STATUS_TEXT, IDC_CHK_SHOW_CURSOR,
 };
 
@@ -667,7 +671,9 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     const int hidBtnH  = btnH;
     const int hidListH = 80;
     const int hidLblH  = lblH;
-    const int opsH     = 30;
+    // Operations group: two rows – top row has 3 buttons, bottom row has the
+    // auto-unload checkbox.
+    const int opsH     = btnH + 4 + 14 + 8;  // button row + gap + checkbox row + padding
 
     int y = H - mY;
 
@@ -726,10 +732,14 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     if (HWND hGrp = GetDlgItem(hDlg, IDC_GRP_OPS))
         MoveWindow(hGrp, mX, opsY, listW, opsH, FALSE);
     {
-        const int bx = mX + 8;
-        const int by = opsY + (opsH - btnH) / 2;
-        Move(IDC_BTN_HIDE,    bx,        by,  90, btnH);
-        Move(IDC_BTN_TOPMOST, bx + 96,   by,  90, btnH);
+        const int bx  = mX + 8;
+        const int by  = opsY + 6;
+        const int bw  = (listW - 16 - 8) / 3;  // three equal-width buttons
+        Move(IDC_BTN_HIDE,       bx,           by, bw,   btnH);
+        Move(IDC_BTN_TOPMOST,    bx + bw + 4,  by, bw,   btnH);
+        Move(IDC_BTN_UNLOAD_DLL, bx + (bw+4)*2, by, bw,  btnH);
+        // Auto-unload checkbox below the buttons
+        Move(IDC_CHK_AUTO_UNLOAD, bx, by + btnH + 4, listW - 16, 14);
     }
 
     // Hidden windows section
@@ -847,7 +857,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         // Apply owner-draw style to buttons for flat dark appearance
-        for (int btnId : {IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_SHOW}) {
+        for (int btnId : {IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_UNLOAD_DLL, IDC_BTN_SHOW}) {
             HWND hBtn = GetDlgItem(hDlg, btnId);
             LONG_PTR style = GetWindowLongPtrW(hBtn, GWL_STYLE);
             style = (style & ~static_cast<LONG_PTR>(BS_TYPEMASK))
@@ -862,6 +872,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         // "Show cursor in preview" checkbox – default off; sync the atomic.
         g_captureShowCursor.store(
             IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
+        // "Auto-unload DLL" checkbox – default on.
+        g_autoUnloadDll = true;
+        CheckDlgButton(hDlg, IDC_CHK_AUTO_UNLOAD, BST_CHECKED);
 
         // Tray icon
         CreateTrayIcon(hDlg);
@@ -1142,30 +1155,19 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                         const WindowInfo& w = g_windows[pnm->iItem];
                         DWORD affinity = shouldExclude ? 0x00000011u : 0x00000000u;
                         SetStatus(hDlg, L"Injecting \u2026");
-                        if (InjectWDASetAffinity(w.hwnd, affinity)) {
+                        if (InjectWDASetAffinity(w.hwnd, affinity, g_autoUnloadDll)) {
                             SetStatus(hDlg, shouldExclude
                                 ? L"ExcludeCapture enabled: \"" + w.title + L"\""
                                 : L"ExcludeCapture disabled: \"" + w.title + L"\"");
                         } else {
                             DWORD err = GetLastError();
-                            std::wstring errMsg;
-                            if (err == ERROR_EXE_MACHINE_TYPE_MISMATCH) {
-#ifdef _WIN64
-                                errMsg = L"Injection failed: architecture mismatch \u2013 "
-                                         L"target is a 32-bit process. "
-                                         L"Use the x86 build of window_mod for 32-bit targets.";
-#else
-                                errMsg = L"Injection failed: architecture mismatch \u2013 "
-                                         L"target is a 64-bit process. "
-                                         L"Use the x64 build of window_mod for 64-bit targets.";
-#endif
-                            } else {
-                                errMsg = L"Injection failed (error "
-                                    + std::to_wstring(err)
-                                    + L"). Run as Administrator, ensure "
-                                      L"wda_inject.dll is beside the exe, "
-                                      L"and check window_mod.log for details.";
-                            }
+                            std::wstring errMsg =
+                                L"Injection failed (error "
+                                + std::to_wstring(err)
+                                + L"). Run as Administrator, ensure "
+                                  L"wda_inject_x64.dll / wda_inject_x86.dll and "
+                                  L"wda_launcher_x86.exe / wda_launcher_x64.exe "
+                                  L"are beside the exe. Check window_mod.log for details.";
                             SetStatus(hDlg, errMsg);
                             // Revert the checkbox
                             g_populatingList = true;
@@ -1258,6 +1260,27 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             break;
         }
+
+        case IDC_BTN_UNLOAD_DLL:
+        {
+            const WindowInfo* w = GetSelectedWindow(hDlg);
+            if (!w) { SetStatus(hDlg, L"No window selected."); break; }
+            SetStatus(hDlg, L"Unloading DLL \u2026");
+            if (UnloadInjectedDll(w->hwnd)) {
+                SetStatus(hDlg, L"DLL unloaded from: \"" + w->title + L"\"");
+            } else {
+                SetStatus(hDlg,
+                    L"Unload failed (error "
+                    + std::to_wstring(GetLastError())
+                    + L"). Run as Administrator and check window_mod.log.");
+            }
+            break;
+        }
+
+        case IDC_CHK_AUTO_UNLOAD:
+            g_autoUnloadDll =
+                (IsDlgButtonChecked(hDlg, IDC_CHK_AUTO_UNLOAD) == BST_CHECKED);
+            break;
 
         case IDC_BTN_SHOW:
         {

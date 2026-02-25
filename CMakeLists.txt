@@ -19,3 +19,6 @@ add_subdirectory(src)
 
 # ── Injection DLL ────────────────────────────────────────────────────────────
 add_subdirectory(inject_dll)
+
+# ── Injection launcher helper (same-arch CLI injector) ───────────────────────
+add_subdirectory(inject_launcher)

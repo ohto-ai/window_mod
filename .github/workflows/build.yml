@@ -18,14 +18,18 @@ jobs:
         include:
           - arch: x64
             cmake_arch: x64
+            opposite_arch: Win32
+            opposite_suffix: x86
           - arch: x86
             cmake_arch: Win32
+            opposite_arch: x64
+            opposite_suffix: x64
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure CMake
+      - name: Configure CMake (main arch)
         run: |
           cmake -B build -A ${{ matrix.cmake_arch }}
 
@@ -33,12 +37,27 @@ jobs:
         run: |
           cmake --build build --config Release --parallel
 
+      - name: Configure CMake (opposite-arch launcher + DLL)
+        run: |
+          cmake -B build_opposite -A ${{ matrix.opposite_arch }}
+
+      - name: Build opposite-arch launcher + DLL (Release)
+        run: |
+          cmake --build build_opposite --config Release --target wda_launcher wda_inject --parallel
+
       - name: Collect artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item build\src\Release\window_mod.exe dist\
           Copy-Item build\src\Release\wda_inject.dll  dist\
+          # Same-arch launcher (already arch-named by CMake post-build step)
+          $suffix = "${{ matrix.arch }}"
+          Copy-Item "build\src\Release\wda_launcher_${suffix}.exe" dist\
+          # Opposite-arch launcher and DLL (for cross-arch injection)
+          $opp = "${{ matrix.opposite_suffix }}"
+          Copy-Item "build_opposite\inject_launcher\Release\wda_launcher.exe" "dist\wda_launcher_${opp}.exe"
+          Copy-Item "build_opposite\inject_dll\Release\wda_inject.dll"        "dist\wda_inject_${opp}.dll"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

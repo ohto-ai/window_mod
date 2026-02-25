@@ -25,6 +25,10 @@
 #define IDC_PLACEHOLDER_LABEL   1068
 #define IDC_CHK_SHOW_PREVIEW    1069
 
+// DLL management controls
+#define IDC_BTN_UNLOAD_DLL      1070
+#define IDC_CHK_AUTO_UNLOAD     1071
+
 // Timers
 #define IDT_REFRESH             1
 #define IDT_PREVIEW             2
