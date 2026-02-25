@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   WiX v4 installer for Window Modifier
-  Build: wix build installer\window_mod.wxs -o installer\Output\WindowModifier.msi
+  Build (from repo root): cd installer && wix build window_mod.wxs -o Output\WindowModifier.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
