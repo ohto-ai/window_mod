@@ -3,9 +3,12 @@
  *
  * Features:
  *  - Dark theme (DWM immersive dark mode + custom WM_CTLCOLOR handling)
- *  - Screen preview with per-monitor tab switching
+ *  - Screen preview with per-monitor tab switching and "Show desktop preview" toggle
  *  - Enumerate visible windows (including own); checkbox per row toggles WDA_EXCLUDEFROMCAPTURE
- *  - Refresh list + preview on mouse activity (WH_MOUSE_LL hook, 300 ms debounce)
+ *  - Window list refreshed asynchronously via injector worker thread on focus gain
+ *  - Screen preview captured continuously (~5 fps) via capture worker thread;
+ *    starts/stops on focus gain/loss, monitor tab change, "Show desktop preview" toggle
+ *  - Two independent background threads (injector + capture) keep the UI responsive
  *  - TopMost toggle button (selected window)
  *  - Hide windows (SW_HIDE) tracked in a separate list for recovery
  *  - Inject wda_inject.dll to set/clear WDA_EXCLUDEFROMCAPTURE
@@ -24,6 +27,12 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <atomic>
+#include <chrono>
 
 #include "resource.h"
 #include "window_list.h"
@@ -34,6 +43,71 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
+
+// ============================================================================
+// Custom window messages posted by background threads to the dialog
+// ============================================================================
+#define WM_APP_WINDOWS_READY  (WM_APP + 1)   // injector thread: window list ready
+#define WM_APP_PREVIEW_READY  (WM_APP + 2)   // capture thread:  preview bitmap ready
+
+// ============================================================================
+// Thread-safe channel (analogous to Rust's crossbeam_channel::unbounded)
+// ============================================================================
+template<typename T>
+class Channel {
+    std::mutex              mtx_;
+    std::condition_variable cv_;
+    std::deque<T>           q_;
+    bool                    closed_ = false;
+public:
+    void send(T val) {
+        { std::lock_guard<std::mutex> lk(mtx_); q_.push_back(std::move(val)); }
+        cv_.notify_one();
+    }
+    // Blocks until an item is available or the channel is closed.
+    // Returns false when closed and the queue is empty.
+    bool recv(T& out) {
+        std::unique_lock<std::mutex> lk(mtx_);
+        cv_.wait(lk, [this]{ return !q_.empty() || closed_; });
+        if (q_.empty()) return false;
+        out = std::move(q_.front());
+        q_.pop_front();
+        return true;
+    }
+    // Waits up to `ms` milliseconds for an item.
+    // Returns true if an item was received, false on timeout or channel close.
+    bool recv_timeout(T& out, unsigned ms) {
+        std::unique_lock<std::mutex> lk(mtx_);
+        bool ready = cv_.wait_for(lk, std::chrono::milliseconds(ms),
+                                  [this]{ return !q_.empty() || closed_; });
+        if (!ready || q_.empty()) return false;
+        out = std::move(q_.front());
+        q_.pop_front();
+        return true;
+    }
+    void close() {
+        { std::lock_guard<std::mutex> lk(mtx_); closed_ = true; }
+        cv_.notify_all();
+    }
+};
+
+// ============================================================================
+// Injector worker events
+// ============================================================================
+enum class InjectorEventType { Update, Quit };
+struct InjectorEvent {
+    InjectorEventType type = InjectorEventType::Update;
+};
+
+// ============================================================================
+// Capture worker events
+// ============================================================================
+enum class CaptureEventType { Capture, StopCapture, Quit };
+struct CaptureEvent {
+    CaptureEventType type       = CaptureEventType::StopCapture;
+    RECT             monitorRect = {};
+    bool             showCursor = false;
+};
 
 // ============================================================================
 // Dark theme colours
@@ -63,7 +137,7 @@ static const UINT STATE_IMAGE_CHECKED   = 2;
 static HINSTANCE g_hInst       = nullptr;
 static HWND      g_hDlg        = nullptr;
 
-static std::vector<WindowInfo> g_windows;       // current window snapshot
+static std::vector<WindowInfo> g_windows;       // current window snapshot (UI thread)
 static std::vector<WindowInfo> g_hiddenWindows; // windows we've hidden
 
 // Monitor / screen preview
@@ -77,6 +151,9 @@ static bool g_populatingList = false;
 // True when the dialog is the active (foreground) window
 static bool g_hasFocus = true;
 
+// Whether the desktop preview is shown (mirrors IDC_CHK_SHOW_PREVIEW)
+static bool g_showDesktopPreview = true;
+
 // Dark theme GDI resources
 static HBRUSH g_hbrBg            = nullptr;
 static HFONT  g_hFontBold        = nullptr;
@@ -86,26 +163,144 @@ static HFONT  g_hFontPlaceholder = nullptr; // large font for the focus-lost scr
 static NOTIFYICONDATA g_nid       = {};
 static bool           g_trayAdded = false;
 
-// Low-level mouse hook – used to trigger list+preview refresh on mouse activity.
-static HHOOK g_mouseHook        = nullptr;
-// Prevents the hook from resetting the debounce timer on every mouse event.
-static bool  g_refreshScheduled = false;
+// ── Injector worker thread ──────────────────────────────────────────────────
+// Receives InjectorEvent::Update, calls EnumerateWindows(), stores result in
+// g_pendingWindows, then posts WM_APP_WINDOWS_READY to the dialog.
+static Channel<InjectorEvent>   g_injectorChannel;
+static std::thread               g_injectorThread;
+static std::mutex                g_pendingWindowsMutex;
+static std::vector<WindowInfo>   g_pendingWindows;
+
+// ── Capture worker thread ───────────────────────────────────────────────────
+// Continuously captures frames (via BitBlt) while in capturing state and posts
+// WM_APP_PREVIEW_READY to the dialog for each frame.
+// CaptureEvent::Capture starts/restarts continuous capture for a given monitor rect.
+// CaptureEvent::StopCapture stops the continuous loop.
+static Channel<CaptureEvent>    g_captureChannel;
+static std::thread               g_captureThread;
+static std::mutex                g_pendingPreviewMutex;
+static HBITMAP                   g_pendingPreviewBmp = nullptr;
+// Mirrors IDC_CHK_SHOW_CURSOR; updated atomically so the capture thread can
+// read it on every frame without touching the UI thread.
+static std::atomic<bool>         g_captureShowCursor{false};
 
 // ============================================================================
 // Forward declarations
 // ============================================================================
 INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// Low-level mouse hook: schedule a one-shot IDT_REFRESH timer on the FIRST
-// mouse event after each refresh (subsequent events within the 300 ms window
-// are ignored so the timer is not constantly reset).
-static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
+// ============================================================================
+// Injector worker thread
+// Handles InjectorEvent::Update: enumerates top-level windows asynchronously
+// and notifies the UI thread via WM_APP_WINDOWS_READY.
+// ============================================================================
+static void InjectorWorkerProc()
 {
-    if (nCode == HC_ACTION && g_hDlg && g_hasFocus && !g_refreshScheduled) {
-        g_refreshScheduled = true;
-        SetTimer(g_hDlg, IDT_REFRESH, 300, nullptr);
+    InjectorEvent evt;
+    while (g_injectorChannel.recv(evt)) {
+        if (evt.type == InjectorEventType::Quit) break;
+        // InjectorEventType::Update
+        auto windows = EnumerateWindows();
+        {
+            std::lock_guard<std::mutex> lk(g_pendingWindowsMutex);
+            g_pendingWindows = std::move(windows);
+        }
+        if (g_hDlg)
+            PostMessage(g_hDlg, WM_APP_WINDOWS_READY, 0, 0);
     }
-    return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
+}
+
+// ============================================================================
+// Capture worker thread
+// Implements a continuous BitBlt capture loop, analogous to Invisiwind's
+// ScreenCapture::start_free_threaded streaming model:
+//   • CaptureEvent::Capture  → enter/restart continuous capture for the given rect
+//   • CaptureEvent::StopCapture → exit continuous capture, discard pending bitmap
+//   • CaptureEvent::Quit     → terminate thread
+//
+// While capturing, a frame is taken every ~200 ms (≈5 fps) and posted to the
+// UI thread via WM_APP_PREVIEW_READY; the cursor overlay is drawn when
+// g_captureShowCursor is set.  Between frames the thread waits on the channel
+// so that a new event (monitor switch, stop, quit) is acted on immediately.
+// ============================================================================
+static void CaptureWorkerProc()
+{
+    bool capturing  = false;
+    RECT activeRect = {};
+
+    auto takeFrame = [&]() {
+        int w = activeRect.right - activeRect.left;
+        int h = activeRect.bottom - activeRect.top;
+        if (w <= 0 || h <= 0) return;
+
+        HDC     hScreen = GetDC(nullptr);
+        HDC     hMem    = CreateCompatibleDC(hScreen);
+        HBITMAP hBmp    = CreateCompatibleBitmap(hScreen, w, h);
+        HGDIOBJ old     = SelectObject(hMem, hBmp);
+        BitBlt(hMem, 0, 0, w, h, hScreen, activeRect.left, activeRect.top, SRCCOPY | CAPTUREBLT);
+
+        if (g_captureShowCursor.load()) {
+            CURSORINFO ci = {};
+            ci.cbSize = sizeof(ci);
+            if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor) {
+                DrawIconEx(hMem,
+                    ci.ptScreenPos.x - activeRect.left,
+                    ci.ptScreenPos.y - activeRect.top,
+                    ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
+            }
+        }
+
+        SelectObject(hMem, old);
+        DeleteDC(hMem);
+        ReleaseDC(nullptr, hScreen);
+
+        // Replace any unconsumed frame (bounded-1 behaviour).
+        HBITMAP discarded = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_pendingPreviewMutex);
+            discarded = g_pendingPreviewBmp;
+            g_pendingPreviewBmp = hBmp;
+        }
+        if (discarded) DeleteObject(discarded);
+
+        if (g_hDlg)
+            PostMessage(g_hDlg, WM_APP_PREVIEW_READY, 0, 0);
+    };
+
+    while (true) {
+        CaptureEvent evt;
+        bool hasEvent;
+
+        if (capturing) {
+            // Take a frame, then wait up to 200 ms for the next event.
+            takeFrame();
+            hasEvent = g_captureChannel.recv_timeout(evt, 200);
+            if (!hasEvent) continue;  // timeout → capture another frame
+        } else {
+            // Idle: block indefinitely until an event arrives.
+            hasEvent = g_captureChannel.recv(evt);
+            if (!hasEvent) break;  // channel closed
+        }
+
+        if (evt.type == CaptureEventType::Quit) break;
+
+        if (evt.type == CaptureEventType::StopCapture) {
+            capturing = false;
+            // Discard any pending (not-yet-consumed) preview bitmap.
+            HBITMAP old = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(g_pendingPreviewMutex);
+                old = g_pendingPreviewBmp;
+                g_pendingPreviewBmp = nullptr;
+            }
+            if (old) DeleteObject(old);
+        } else if (evt.type == CaptureEventType::Capture) {
+            // Start or restart continuous capture (e.g. monitor switched).
+            capturing  = true;
+            activeRect = evt.monitorRect;
+            // Next iteration will call takeFrame() immediately.
+        }
+    }
 }
 
 // ============================================================================
@@ -167,43 +362,28 @@ static void EnumerateMonitors()
 }
 
 // ============================================================================
-// Screen capture
+// Screen capture – helpers
 // ============================================================================
 
-static void CaptureMonitor(int idx)
+// Send a Capture event to the capture worker thread.
+// The cursor-overlay state is tracked via g_captureShowCursor (atomic) so
+// the worker reads the up-to-date value on every frame without touching the UI.
+static void SendCaptureEvent(int monitorIdx)
 {
-    if (idx < 0 || idx >= static_cast<int>(g_monitors.size()))
+    if (monitorIdx < 0 || monitorIdx >= static_cast<int>(g_monitors.size()))
         return;
-    const RECT& mr = g_monitors[idx];
-    int w = mr.right - mr.left;
-    int h = mr.bottom - mr.top;
-    if (w <= 0 || h <= 0) return;
+    CaptureEvent evt;
+    evt.type        = CaptureEventType::Capture;
+    evt.monitorRect = g_monitors[monitorIdx];
+    g_captureChannel.send(evt);
+}
 
-    HDC     hScreen = GetDC(nullptr);
-    HDC     hMem    = CreateCompatibleDC(hScreen);
-    HBITMAP hBmp    = CreateCompatibleBitmap(hScreen, w, h);
-    HGDIOBJ old     = SelectObject(hMem, hBmp);
-    BitBlt(hMem, 0, 0, w, h, hScreen, mr.left, mr.top, SRCCOPY | CAPTUREBLT);
-
-    // Optionally overlay the mouse cursor on the captured bitmap.
-    if (g_hDlg && IsDlgButtonChecked(g_hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED) {
-        CURSORINFO ci = {};
-        ci.cbSize = sizeof(ci);
-        if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor) {
-            DrawIconEx(hMem,
-                ci.ptScreenPos.x - mr.left,
-                ci.ptScreenPos.y - mr.top,
-                ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
-        }
-    }
-
-    SelectObject(hMem, old);
-    DeleteDC(hMem);
-    ReleaseDC(nullptr, hScreen);
-
-    if (g_previewBmp)
-        DeleteObject(g_previewBmp);
-    g_previewBmp = hBmp;
+// Send a StopCapture event (e.g. on focus loss).
+static void SendStopCaptureEvent()
+{
+    CaptureEvent evt;
+    evt.type = CaptureEventType::StopCapture;
+    g_captureChannel.send(evt);
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +429,10 @@ static void InitMainListViewColumns(HWND hList)
 }
 
 // ---------------------------------------------------------------------------
-// Populate (or refresh) the main window list.
+// Populate (or refresh) the main window list from the current g_windows snapshot.
+// The caller is responsible for ensuring g_windows is up-to-date before calling.
+// Use g_injectorChannel.send({InjectorEventType::Update}) to request an async
+// refresh; the injector thread will post WM_APP_WINDOWS_READY when done.
 
 static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 {
@@ -264,7 +447,6 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 
     g_populatingList = true;
     ListView_DeleteAllItems(hList);
-    g_windows = EnumerateWindows(); // include our own window
 
     // Build an image list from per-window icons.
     int n = static_cast<int>(g_windows.size());
@@ -327,6 +509,7 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 // All regular control IDs – used to show/hide them en masse.
 static const int s_allControls[] = {
     IDC_PREVIEW_LABEL, IDC_PREVIEW_SUBTEXT, IDC_PREVIEW_STATIC, IDC_TAB_SCREENS,
+    IDC_CHK_SHOW_PREVIEW,
     IDC_HIDE_APPS_LABEL, IDC_HIDE_APPS_SUB, IDC_WINDOW_LIST, IDC_SELECTED_INFO,
     IDC_GRP_OPS, IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_GRP_HIDDEN, IDC_HIDDEN_LIST,
     IDC_BTN_SHOW, IDC_STATUS_TEXT, IDC_CHK_SHOW_CURSOR,
@@ -502,7 +685,8 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     int previewH = std::max(PREVIEW_H_MIN,
                             std::min(PREVIEW_H_MAX, H * PREVIEW_H_PCT / 100));
     top += previewH + DY;
-    int tabY     = top;  top += 22 + DY + 4;
+    int tabY     = top;  top += 22 + DY;
+    int prevChkY = top;  top += 14 + DY;  // "Show desktop preview" checkbox
     int hideAppY = top;  top += bigH + 2;
     int hideSubY = top;  top += subH + DY;
     int listY    = top;
@@ -523,6 +707,7 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     Move(IDC_PREVIEW_SUBTEXT, mX, prevSubY, listW, subH);
     Move(IDC_PREVIEW_STATIC,  mX, previewY, listW, previewH);
     Move(IDC_TAB_SCREENS,     mX, tabY,     listW, 22);
+    Move(IDC_CHK_SHOW_PREVIEW, mX, prevChkY, listW, 14);
 
     // Hide applications section
     Move(IDC_HIDE_APPS_LABEL, mX, hideAppY, listW, bigH);
@@ -667,21 +852,27 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             SetWindowLongPtrW(hBtn, GWL_STYLE, style);
         }
 
-        // Initial screen capture
-        CaptureMonitor(0);
+        // "Show desktop preview" checkbox – default on
+        g_showDesktopPreview = true;
+        CheckDlgButton(hDlg, IDC_CHK_SHOW_PREVIEW,
+                       g_showDesktopPreview ? BST_CHECKED : BST_UNCHECKED);
+        // "Show cursor in preview" checkbox – default off; sync the atomic.
+        g_captureShowCursor.store(
+            IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
 
         // Tray icon
         CreateTrayIcon(hDlg);
 
-        // Install low-level mouse hook for mouse-driven refresh.
-        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc,
-                                        GetModuleHandleW(nullptr), 0);
-        // Fallback: if hook unavailable, use a periodic refresh timer.
-        if (!g_mouseHook)
-            SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
+        // Start the two background worker threads.
+        g_injectorThread = std::thread(InjectorWorkerProc);
+        g_captureThread  = std::thread(CaptureWorkerProc);
 
-        // Populate list (initial capture already done above).
-        PopulateWindowList(hDlg);
+        // Request initial window enumeration (async).
+        g_injectorChannel.send(InjectorEvent{InjectorEventType::Update});
+
+        // Start the initial screen preview if enabled (async).
+        if (g_showDesktopPreview && !g_monitors.empty())
+            SendCaptureEvent(0);
 
         // Trigger initial layout
         {
@@ -692,46 +883,30 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     // --------------------------------------------------------------------
-    // Auto-refresh on focus; placeholder when unfocused.
+    // Window gain/lose focus: drive injector-worker updates and capture.
     case WM_ACTIVATE:
     {
         if (LOWORD(wParam) == WA_INACTIVE) {
             g_hasFocus = false;
-            g_refreshScheduled = false;
-            KillTimer(hDlg, IDT_REFRESH); // cancel any pending debounce
-            // Release the last capture so the process is not held
+            // Stop the screen preview while unfocused.
             if (g_previewBmp) {
                 DeleteObject(g_previewBmp);
                 g_previewBmp = nullptr;
             }
+            SendStopCaptureEvent();
             ShowPlaceholder(hDlg);
         } else {
             g_hasFocus = true;
             HidePlaceholder(hDlg);
-            CaptureMonitor(g_currentMonitor);
-            PopulateWindowList(hDlg);
+            // Trigger async window-list refresh (Invisiwind: InjectorWorkerEvent::Update).
+            g_injectorChannel.send(InjectorEvent{InjectorEventType::Update});
+            // Restart screen preview if enabled (Invisiwind: CaptureWorkerEvent::Capture).
+            if (g_showDesktopPreview)
+                SendCaptureEvent(g_currentMonitor);
             UpdateSelectedInfo(hDlg);
-            // If the mouse hook is unavailable, restart the fallback timer.
-            if (!g_mouseHook)
-                SetTimer(hDlg, IDT_REFRESH, 2000, nullptr);
-            if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
-                InvalidateRect(hPrev, nullptr, FALSE);
         }
         return FALSE;
     }
-
-    // --------------------------------------------------------------------
-    case WM_TIMER:
-        if (wParam == IDT_REFRESH) {
-            if (g_mouseHook) KillTimer(hDlg, IDT_REFRESH); // one-shot when hook active
-            g_refreshScheduled = false; // allow the next mouse event to schedule again
-            PopulateWindowList(hDlg, true);
-            UpdateSelectedInfo(hDlg);
-            CaptureMonitor(g_currentMonitor);
-            if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
-                InvalidateRect(hPrev, nullptr, FALSE);
-        }
-        return TRUE;
 
     // --------------------------------------------------------------------
     // Owner-draw: preview static + flat dark buttons.
@@ -939,9 +1114,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             g_currentMonitor = TabCtrl_GetCurSel(
                 GetDlgItem(hDlg, IDC_TAB_SCREENS));
-            CaptureMonitor(g_currentMonitor);
-            if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
-                InvalidateRect(hPrev, nullptr, FALSE);
+            // Invisiwind: clicking a monitor tab sends CaptureWorkerEvent::Capture(*monitor)
+            if (g_showDesktopPreview)
+                SendCaptureEvent(g_currentMonitor);
         }
 
         // Main window list notifications
@@ -1033,6 +1208,8 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             if (HideWindow(w->hwnd)) {
                 g_hiddenWindows.push_back(*w);
                 PopulateHiddenList(hDlg);
+                // Immediate sync re-enumeration (user action, needs instant feedback).
+                g_windows = EnumerateWindows();
                 PopulateWindowList(hDlg);
                 UpdateSelectedInfo(hDlg);
                 SetStatus(hDlg, L"Hidden: \"" + w->title + L"\"");
@@ -1083,6 +1260,8 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 SetStatus(hDlg, L"Restored: \"" + w.title + L"\"");
                 g_hiddenWindows.erase(g_hiddenWindows.begin() + sel);
                 PopulateHiddenList(hDlg);
+                // Immediate sync re-enumeration (user action, needs instant feedback).
+                g_windows = EnumerateWindows();
                 PopulateWindowList(hDlg);
                 UpdateSelectedInfo(hDlg);
             } else {
@@ -1090,6 +1269,33 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             break;
         }
+
+        case IDC_CHK_SHOW_PREVIEW:
+        {
+            // Invisiwind: toggling "Show desktop preview" sends Capture or StopCapture.
+            g_showDesktopPreview =
+                (IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_PREVIEW) == BST_CHECKED);
+            if (g_showDesktopPreview) {
+                SendCaptureEvent(g_currentMonitor);
+            } else {
+                // Clear existing preview bitmap immediately.
+                if (g_previewBmp) {
+                    DeleteObject(g_previewBmp);
+                    g_previewBmp = nullptr;
+                }
+                if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
+                    InvalidateRect(hPrev, nullptr, FALSE);
+                SendStopCaptureEvent();
+            }
+            break;
+        }
+
+        case IDC_CHK_SHOW_CURSOR:
+            // Keep the atomic in sync so the capture worker reads the new value
+            // on the very next frame without any channel round-trip.
+            g_captureShowCursor.store(
+                IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
+            break;
 
         case IDM_TRAY_SHOW:
             if (IsWindowVisible(hDlg)) {
@@ -1101,7 +1307,6 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             break;
 
         case IDM_TRAY_EXIT:
-            KillTimer(hDlg, IDT_REFRESH);
             RestoreAllHiddenWindows();
             DestroyTrayIcon();
             EndDialog(hDlg, 0);
@@ -1116,8 +1321,50 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     // --------------------------------------------------------------------
+    // Injector thread: window list ready – swap and refresh the ListView.
+    case WM_APP_WINDOWS_READY:
+    {
+        {
+            std::lock_guard<std::mutex> lk(g_pendingWindowsMutex);
+            g_windows = std::move(g_pendingWindows);
+        }
+        PopulateWindowList(hDlg);
+        UpdateSelectedInfo(hDlg);
+        return TRUE;
+    }
+
+    // --------------------------------------------------------------------
+    // Capture thread: new preview bitmap ready – swap and repaint.
+    case WM_APP_PREVIEW_READY:
+    {
+        HBITMAP newBmp = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_pendingPreviewMutex);
+            newBmp = g_pendingPreviewBmp;
+            g_pendingPreviewBmp = nullptr;
+        }
+        if (newBmp) {
+            if (g_previewBmp) DeleteObject(g_previewBmp);
+            g_previewBmp = newBmp;
+            if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
+                InvalidateRect(hPrev, nullptr, FALSE);
+        }
+        return TRUE;
+    }
+
+    // --------------------------------------------------------------------
     case WM_DESTROY:
-        if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = nullptr; }
+        // Shut down worker threads cleanly before releasing GDI resources.
+        g_hDlg = nullptr;   // prevent PostMessage from racing during teardown
+        g_injectorChannel.send(InjectorEvent{InjectorEventType::Quit});
+        g_captureChannel.send(CaptureEvent{CaptureEventType::Quit});
+        if (g_injectorThread.joinable()) g_injectorThread.join();
+        if (g_captureThread.joinable())  g_captureThread.join();
+        // Clean up any pending preview bitmap that was never consumed.
+        {
+            std::lock_guard<std::mutex> lk(g_pendingPreviewMutex);
+            if (g_pendingPreviewBmp) { DeleteObject(g_pendingPreviewBmp); g_pendingPreviewBmp = nullptr; }
+        }
         if (g_hbrBg)            { DeleteObject(g_hbrBg);            g_hbrBg            = nullptr; }
         if (g_hFontBold)        { DeleteObject(g_hFontBold);        g_hFontBold        = nullptr; }
         if (g_hFontPlaceholder) { DeleteObject(g_hFontPlaceholder); g_hFontPlaceholder = nullptr; }

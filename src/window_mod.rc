@@ -50,6 +50,9 @@ BEGIN
     // ---- Cursor checkbox (positioned by OnSize, initially near preview label) --
     AUTOCHECKBOX "Show cursor in preview", IDC_CHK_SHOW_CURSOR, 160, 7, 133, 12
 
+    // ---- Show desktop preview checkbox (positioned by OnSize) -----------------
+    AUTOCHECKBOX "Show desktop preview", IDC_CHK_SHOW_PREVIEW, 7, 135, 140, 12
+
     // ---- Full-page placeholder shown when the app loses focus -----------------
     // SS_CENTER|SS_CENTERIMAGE = 0x0201; starts hidden (no WS_VISIBLE)
     CONTROL ":)", IDC_PLACEHOLDER_LABEL, "Static",

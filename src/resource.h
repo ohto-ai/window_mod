@@ -23,6 +23,7 @@
 #define IDC_BTN_TOPMOST         1066
 #define IDC_CHK_SHOW_CURSOR     1067
 #define IDC_PLACEHOLDER_LABEL   1068
+#define IDC_CHK_SHOW_PREVIEW    1069
 
 // Timers
 #define IDT_REFRESH             1
