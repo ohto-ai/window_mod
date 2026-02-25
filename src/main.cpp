@@ -406,6 +406,113 @@ static void CaptureWorkerProc()
 }
 
 // ============================================================================
+// Settings persistence (HKCU\Software\WindowModifier)
+// ============================================================================
+static const wchar_t* const REG_APP_KEY = L"Software\\WindowModifier";
+
+static void SaveSettings()
+{
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_APP_KEY, 0, nullptr,
+            REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr)
+        != ERROR_SUCCESS)
+        return;
+
+    DWORD showPreview = g_showDesktopPreview ? 1u : 0u;
+    RegSetValueExW(hKey, L"ShowDesktopPreview", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&showPreview), sizeof(showPreview));
+
+    DWORD showCursor = g_captureShowCursor.load() ? 1u : 0u;
+    RegSetValueExW(hKey, L"ShowCursorInPreview", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&showCursor), sizeof(showCursor));
+
+    // Build REG_MULTI_SZ: each name null-terminated, list ends with extra null.
+    {
+        std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+        std::vector<wchar_t> buf;
+        for (const auto& name : g_watchedExeNames) {
+            buf.insert(buf.end(), name.begin(), name.end());
+            buf.push_back(L'\0');
+        }
+        buf.push_back(L'\0');
+        RegSetValueExW(hKey, L"WatchedExeNames", 0, REG_MULTI_SZ,
+            reinterpret_cast<const BYTE*>(buf.data()),
+            static_cast<DWORD>(buf.size() * sizeof(wchar_t)));
+    }
+
+    RegCloseKey(hKey);
+}
+
+static void LoadSettings(HWND hDlg)
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_APP_KEY,
+            0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return;
+
+    // ShowDesktopPreview
+    {
+        DWORD val = 1, size = sizeof(val), type = 0;
+        if (RegQueryValueExW(hKey, L"ShowDesktopPreview", nullptr, &type,
+                reinterpret_cast<BYTE*>(&val), &size) == ERROR_SUCCESS
+            && type == REG_DWORD)
+        {
+            g_showDesktopPreview = (val != 0);
+            CheckDlgButton(hDlg, IDC_CHK_SHOW_PREVIEW,
+                g_showDesktopPreview ? BST_CHECKED : BST_UNCHECKED);
+            // Show/hide preview-related controls to match the loaded state
+            int sw = g_showDesktopPreview ? SW_SHOW : SW_HIDE;
+            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_SUBTEXT), sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_STATIC),  sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_TAB_SCREENS),     sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_CHK_SHOW_CURSOR), sw);
+        }
+    }
+
+    // ShowCursorInPreview
+    {
+        DWORD val = 0, size = sizeof(val), type = 0;
+        if (RegQueryValueExW(hKey, L"ShowCursorInPreview", nullptr, &type,
+                reinterpret_cast<BYTE*>(&val), &size) == ERROR_SUCCESS
+            && type == REG_DWORD)
+        {
+            g_captureShowCursor.store(val != 0);
+            CheckDlgButton(hDlg, IDC_CHK_SHOW_CURSOR,
+                val ? BST_CHECKED : BST_UNCHECKED);
+        }
+    }
+
+    // WatchedExeNames (REG_MULTI_SZ)
+    {
+        DWORD type = 0, size = 0;
+        if (RegQueryValueExW(hKey, L"WatchedExeNames", nullptr, &type,
+                nullptr, &size) == ERROR_SUCCESS
+            && type == REG_MULTI_SZ && size > 0)
+        {
+            std::vector<wchar_t> buf(size / sizeof(wchar_t));
+            if (RegQueryValueExW(hKey, L"WatchedExeNames", nullptr, nullptr,
+                    reinterpret_cast<BYTE*>(buf.data()), &size) == ERROR_SUCCESS)
+            {
+                HWND hList = GetDlgItem(hDlg, IDC_WATCH_LIST);
+                std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+                g_watchedExeNames.clear();
+                for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
+                    std::wstring name(p);
+                    g_watchedExeNames.push_back(name);
+                    LVITEMW lvi = {};
+                    lvi.mask    = LVIF_TEXT;
+                    lvi.iItem   = ListView_GetItemCount(hList);
+                    lvi.pszText = const_cast<LPWSTR>(name.c_str());
+                    ListView_InsertItem(hList, &lvi);
+                }
+            }
+        }
+    }
+
+    RegCloseKey(hKey);
+}
+
+// ============================================================================
 // Auto-start helpers (HKCU\...\Run registry key)
 // ============================================================================
 
@@ -1101,6 +1208,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         g_autoUnloadDll = true;
         CheckDlgButton(hDlg, IDC_CHK_AUTO_UNLOAD, BST_CHECKED);
 
+        // Load persisted settings (may override the defaults set above).
+        LoadSettings(hDlg);
+
         // Tray icon
         CreateTrayIcon(hDlg);
 
@@ -1578,6 +1688,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
                 SendStopCaptureEvent();
             }
+            SaveSettings();
             break;
         }
 
@@ -1586,6 +1697,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             // on the very next frame without any channel round-trip.
             g_captureShowCursor.store(
                 IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
+            SaveSettings();
             break;
 
         case IDC_BTN_WATCH_ADD:
@@ -1618,6 +1730,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             SetDlgItemTextW(hDlg, IDC_WATCH_EDIT, L"");
             SetStatus(hDlg, L"Watching: " + name);
+            SaveSettings();
         done_watch_add:;
             break;
         }
@@ -1634,6 +1747,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             ListView_DeleteItem(hList, sel);
             SetStatus(hDlg, L"Watch entry removed.");
+            SaveSettings();
             break;
         }
 
