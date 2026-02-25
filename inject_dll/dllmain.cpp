@@ -24,10 +24,14 @@
 #endif
 
 // Layout of the shared-memory block (must match src/injector.cpp).
+// Use fixed-width UINT64 for the HWND field so the struct has identical layout
+// in 32-bit and 64-bit builds (HWND is 4 bytes in 32-bit, 8 in 64-bit).
+#pragma pack(push, 1)
 struct WdaSharedData {
-    HWND  hwnd;
-    DWORD affinity;
+    UINT64 hwnd;     // HWND stored as fixed 64-bit; upper 32 bits = 0
+    DWORD  affinity;
 };
+#pragma pack(pop)
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReason, LPVOID /*lpReserved*/)
 {
@@ -38,23 +42,38 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReason, LPVOID /*lpReserved*/)
 
     // Open the shared memory created by the injector.
     HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, WDA_SHARED_MEM_NAME);
-    if (!hMap)
+    if (!hMap) {
+        OutputDebugStringA("wda_inject: OpenFileMappingW failed – shared memory not found.\n");
         return TRUE; // nothing we can do; return TRUE so the DLL loads
+    }
 
     const void* pView = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, sizeof(WdaSharedData));
     if (!pView) {
+        OutputDebugStringA("wda_inject: MapViewOfFile failed.\n");
         CloseHandle(hMap);
         return TRUE;
     }
 
     const auto* pData = reinterpret_cast<const WdaSharedData*>(pView);
-    HWND  hwnd     = pData->hwnd;
+    HWND  hwnd     = reinterpret_cast<HWND>(static_cast<UINT_PTR>(pData->hwnd));
     DWORD affinity = pData->affinity;
     UnmapViewOfFile(pView);
     CloseHandle(hMap);
 
-    if (hwnd && IsWindow(hwnd))
-        SetWindowDisplayAffinity(hwnd, affinity);
+    if (!hwnd || !IsWindow(hwnd)) {
+        OutputDebugStringA("wda_inject: HWND is invalid.\n");
+        return TRUE;
+    }
+
+    BOOL ok = SetWindowDisplayAffinity(hwnd, affinity);
+    if (ok) {
+        OutputDebugStringA("wda_inject: SetWindowDisplayAffinity succeeded.\n");
+    } else {
+        char buf[128];
+        wsprintfA(buf, "wda_inject: SetWindowDisplayAffinity failed (error %lu).\n",
+                  GetLastError());
+        OutputDebugStringA(buf);
+    }
 
     return TRUE;
 }
