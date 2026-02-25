@@ -67,7 +67,7 @@ jobs:
           if-no-files-found: error
 
   installer:
-    name: Build Installer (MSI)
+    name: Build Installer (Inno Setup)
     runs-on: windows-latest
     needs: build
 
@@ -81,16 +81,13 @@ jobs:
           name: window_mod-x64
           path: dist
 
-      - name: Install WiX Toolset v4
-        run: dotnet tool install --global wix
+      - name: Build installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\window_mod.iss
 
-      - name: Build MSI
-        working-directory: installer
-        run: wix build window_mod.wxs -o Output\WindowModifier.msi
-
-      - name: Upload MSI
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: window_mod-installer
-          path: installer\Output\WindowModifier.msi
+          path: installer\Output\WindowModifierInstaller.exe
           if-no-files-found: error
