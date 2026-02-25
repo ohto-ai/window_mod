@@ -20,7 +20,9 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <algorithm>
+#include <atomic>
 #include <string>
+#include <thread>
 #include <vector>
 #include <sstream>
 #include <iomanip>
@@ -92,10 +94,12 @@ static bool           g_trayAdded = false;
 // Critical section and pending buffer for background window enumeration.
 // g_pendingWindows is written by the background thread (under g_pendingLock)
 // and consumed by the UI thread in WM_WINDOWS_UPDATED.
-// g_windows is only ever written on the UI thread (WM_INITDIALOG and
-// WM_WINDOWS_UPDATED), so it needs no separate lock.
+// g_windows is only ever written on the UI thread (WM_WINDOWS_UPDATED), so
+// it needs no separate lock.
+// g_enumPending: prevents launching a second enumeration while one is running.
 static CRITICAL_SECTION        g_pendingLock;
 static std::vector<WindowInfo> g_pendingWindows;
+static std::atomic<bool>       g_enumPending{false};
 
 // ============================================================================
 // Forward declarations
@@ -319,22 +323,24 @@ static void RefreshWindowListUI(HWND hDlg, bool preserveSelection = false)
 
 // ---------------------------------------------------------------------------
 // Background thread: enumerate windows then notify the UI thread.
+// std::thread is used (instead of CreateThread) so that the MinGW/MSVC C++
+// runtime is properly initialised per-thread (std::vector, std::wstring, etc.).
 
-static DWORD WINAPI WindowEnumThreadProc(LPVOID)
-{
-    auto windows = EnumerateWindows();
-    EnterCriticalSection(&g_pendingLock);
-    g_pendingWindows = std::move(windows);
-    LeaveCriticalSection(&g_pendingLock);
-    if (g_hDlg) PostMessageW(g_hDlg, WM_WINDOWS_UPDATED, 0, 0);
-    return 0;
-}
-
-// Spawn a background window enumeration; the UI is updated via WM_WINDOWS_UPDATED.
 static void TriggerWindowEnumeration()
 {
-    HANDLE h = CreateThread(nullptr, 0, WindowEnumThreadProc, nullptr, 0, nullptr);
-    if (h) CloseHandle(h); // detach; thread posts WM_WINDOWS_UPDATED when done
+    // Avoid launching a second thread while a prior enumeration is still running.
+    bool expected = false;
+    if (!g_enumPending.compare_exchange_strong(expected, true))
+        return;
+
+    std::thread([]() {
+        auto windows = EnumerateWindows();
+        EnterCriticalSection(&g_pendingLock);
+        g_pendingWindows = std::move(windows);
+        LeaveCriticalSection(&g_pendingLock);
+        g_enumPending.store(false);
+        if (g_hDlg) PostMessageW(g_hDlg, WM_WINDOWS_UPDATED, 0, 0);
+    }).detach();
 }
 
 // ---------------------------------------------------------------------------
@@ -688,10 +694,6 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         // Initialise the critical section used by the background enum thread.
         InitializeCriticalSection(&g_pendingLock);
-
-        // Initial synchronous window list populate (only at startup).
-        g_windows = EnumerateWindows();
-        RefreshWindowListUI(hDlg);
 
         // Trigger initial layout
         {
