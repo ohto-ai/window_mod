@@ -545,6 +545,13 @@ static void HidePlaceholder(HWND hDlg)
     for (int id : s_allControls)
         if (HWND h = GetDlgItem(hDlg, id))
             ShowWindow(h, SW_SHOW);
+    // Re-hide preview-related controls if desktop preview is disabled
+    if (!g_showDesktopPreview) {
+        ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_SUBTEXT), SW_HIDE);
+        ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_STATIC),  SW_HIDE);
+        ShowWindow(GetDlgItem(hDlg, IDC_TAB_SCREENS),     SW_HIDE);
+        ShowWindow(GetDlgItem(hDlg, IDC_CHK_SHOW_CURSOR), SW_HIDE);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -688,14 +695,16 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     int top = mY;
 
     int prevLblY = top;  top += bigH + 2;
-    int prevSubY = top;  top += subH + DY;
-    int previewY = top;
-    // Window list fills the gap between top and bottom zones
-    int previewH = std::max(PREVIEW_H_MIN,
+    // Preview-related controls only occupy vertical space when the preview is shown
+    int prevSubY = 0, previewY = 0, previewH = 0, tabY = 0;
+    if (g_showDesktopPreview) {
+        prevSubY = top;  top += subH + DY;
+        previewY = top;
+        previewH = std::max(PREVIEW_H_MIN,
                             std::min(PREVIEW_H_MAX, H * PREVIEW_H_PCT / 100));
-    top += previewH + DY;
-    int tabY     = top;  top += 22 + DY;
-    int prevChkY = top;  top += 14 + DY;  // "Show desktop preview" checkbox
+        top += previewH + DY;
+        tabY = top;  top += 22 + DY;
+    }
     int hideAppY = top;  top += bigH + 2;
     int hideSubY = top;  top += subH + DY;
     int listY    = top;
@@ -709,14 +718,17 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
             MoveWindow(hCtrl, x, cy2, cw, ch, FALSE);
     };
 
-    // Preview section – label on the left, cursor checkbox on the right
-    static const int chkW = 140;
-    Move(IDC_PREVIEW_LABEL,   mX, prevLblY, listW - chkW - 4, bigH);
-    Move(IDC_CHK_SHOW_CURSOR, mX + listW - chkW, prevLblY, chkW, bigH);
-    Move(IDC_PREVIEW_SUBTEXT, mX, prevSubY, listW, subH);
-    Move(IDC_PREVIEW_STATIC,  mX, previewY, listW, previewH);
-    Move(IDC_TAB_SCREENS,     mX, tabY,     listW, 22);
-    Move(IDC_CHK_SHOW_PREVIEW, mX, prevChkY, listW, 14);
+    // Preview section – label and both checkboxes share the top row
+    static const int chkW  = 140; // "Show cursor in preview" width
+    static const int chkW2 = 160; // "Show desktop preview" width
+    Move(IDC_PREVIEW_LABEL,    mX, prevLblY, listW - chkW2 - chkW - 8, bigH);
+    Move(IDC_CHK_SHOW_PREVIEW, mX + listW - chkW2 - chkW - 4, prevLblY, chkW2, bigH);
+    Move(IDC_CHK_SHOW_CURSOR,  mX + listW - chkW, prevLblY, chkW, bigH);
+    if (g_showDesktopPreview) {
+        Move(IDC_PREVIEW_SUBTEXT, mX, prevSubY, listW, subH);
+        Move(IDC_PREVIEW_STATIC,  mX, previewY, listW, previewH);
+        Move(IDC_TAB_SCREENS,     mX, tabY,     listW, 22);
+    }
 
     // Hide applications section
     Move(IDC_HIDE_APPS_LABEL, mX, hideAppY, listW, bigH);
@@ -1316,6 +1328,17 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             // Invisiwind: toggling "Show desktop preview" sends Capture or StopCapture.
             g_showDesktopPreview =
                 (IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_PREVIEW) == BST_CHECKED);
+            // Show or hide preview-related controls based on the new state
+            int sw = g_showDesktopPreview ? SW_SHOW : SW_HIDE;
+            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_SUBTEXT), sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_STATIC),  sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_TAB_SCREENS),     sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_CHK_SHOW_CURSOR), sw);
+            // Relayout so the window list expands/contracts accordingly
+            {
+                RECT rc; GetClientRect(hDlg, &rc);
+                OnSize(hDlg, rc.right, rc.bottom);
+            }
             if (g_showDesktopPreview) {
                 SendCaptureEvent(g_currentMonitor);
             } else {
@@ -1324,8 +1347,6 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                     DeleteObject(g_previewBmp);
                     g_previewBmp = nullptr;
                 }
-                if (HWND hPrev = GetDlgItem(hDlg, IDC_PREVIEW_STATIC))
-                    InvalidateRect(hPrev, nullptr, FALSE);
                 SendStopCaptureEvent();
             }
             break;

@@ -65,3 +65,32 @@ jobs:
           name: window_mod-${{ matrix.arch }}
           path: dist\
           if-no-files-found: error
+
+  installer:
+    name: Build Installer
+    runs-on: windows-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download x64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: window_mod-x64
+          path: dist
+
+      - name: Install Inno Setup
+        shell: cmd
+        run: choco upgrade innosetup -y --no-progress
+
+      - name: Build Installer
+        run: iscc .\installer\inno.iss
+
+      - name: Upload Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: window_mod-installer
+          path: installer\Output\WindowModifierInstaller.exe
+          if-no-files-found: error
