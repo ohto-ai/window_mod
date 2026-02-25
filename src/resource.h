@@ -32,9 +32,17 @@
 #define IDC_BTN_UNLOAD_DLL      1070
 #define IDC_CHK_AUTO_UNLOAD     1071
 
+// Process watch controls
+#define IDC_GRP_WATCH           1080
+#define IDC_WATCH_EDIT          1081
+#define IDC_BTN_WATCH_ADD       1082
+#define IDC_BTN_WATCH_REMOVE    1083
+#define IDC_WATCH_LIST          1084
+
 // Timers
 #define IDT_REFRESH             1
 #define IDT_PREVIEW             2
+#define IDT_WATCH               3
 
 // Tray icon
 #define WM_TRAYICON             (WM_USER + 1)

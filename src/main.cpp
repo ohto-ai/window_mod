@@ -22,9 +22,11 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <psapi.h>
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <set>
 #include <sstream>
 #include <iomanip>
 #include <thread>
@@ -50,6 +52,7 @@
 // ============================================================================
 #define WM_APP_WINDOWS_READY  (WM_APP + 1)   // injector thread: window list ready
 #define WM_APP_PREVIEW_READY  (WM_APP + 2)   // capture thread:  preview bitmap ready
+#define WM_APP_WATCH_APPLIED  (WM_APP + 3)   // injector thread: watch rule applied
 
 // ============================================================================
 // Thread-safe channel (analogous to Rust's crossbeam_channel::unbounded)
@@ -95,7 +98,7 @@ public:
 // ============================================================================
 // Injector worker events
 // ============================================================================
-enum class InjectorEventType { Update, Quit };
+enum class InjectorEventType { Update, WatchCheck, Quit };
 struct InjectorEvent {
     InjectorEventType type = InjectorEventType::Update;
 };
@@ -175,6 +178,14 @@ static std::thread               g_injectorThread;
 static std::mutex                g_pendingWindowsMutex;
 static std::vector<WindowInfo>   g_pendingWindows;
 
+// ── Process watch ───────────────────────────────────────────────────────────
+// g_watchedExeNames: exe filenames to monitor (UI-thread owned; copied under lock).
+// g_watchedPids:     PIDs already injected (updated by injector thread; cleaned on exit).
+static std::vector<std::wstring> g_watchedExeNames;
+static std::mutex                g_watchedExeMutex;
+static std::set<DWORD>           g_watchedPids;
+static std::mutex                g_watchedPidsMutex;
+
 // ── Capture worker thread ───────────────────────────────────────────────────
 // Continuously captures frames (via BitBlt) while in capturing state and posts
 // WM_APP_PREVIEW_READY to the dialog for each frame.
@@ -203,14 +214,100 @@ static void InjectorWorkerProc()
     InjectorEvent evt;
     while (g_injectorChannel.recv(evt)) {
         if (evt.type == InjectorEventType::Quit) break;
-        // InjectorEventType::Update
-        auto windows = EnumerateWindows();
-        {
-            std::lock_guard<std::mutex> lk(g_pendingWindowsMutex);
-            g_pendingWindows = std::move(windows);
+
+        if (evt.type == InjectorEventType::Update) {
+            // Enumerate top-level windows and notify the UI thread.
+            auto windows = EnumerateWindows();
+            {
+                std::lock_guard<std::mutex> lk(g_pendingWindowsMutex);
+                g_pendingWindows = std::move(windows);
+            }
+            if (g_hDlg)
+                PostMessage(g_hDlg, WM_APP_WINDOWS_READY, 0, 0);
         }
-        if (g_hDlg)
-            PostMessage(g_hDlg, WM_APP_WINDOWS_READY, 0, 0);
+        else if (evt.type == InjectorEventType::WatchCheck) {
+            // Get a snapshot of the current watch list.
+            std::vector<std::wstring> watchNames;
+            {
+                std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+                watchNames = g_watchedExeNames;
+            }
+            if (watchNames.empty()) continue;
+
+            // Clean up PIDs that are no longer alive.
+            {
+                std::lock_guard<std::mutex> lk(g_watchedPidsMutex);
+                for (auto it = g_watchedPids.begin(); it != g_watchedPids.end(); ) {
+                    HANDLE hP = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, *it);
+                    if (!hP) {
+                        it = g_watchedPids.erase(it);
+                    } else {
+                        DWORD code = 0;
+                        GetExitCodeProcess(hP, &code);
+                        CloseHandle(hP);
+                        it = (code != STILL_ACTIVE) ? g_watchedPids.erase(it) : ++it;
+                    }
+                }
+            }
+
+            // Enumerate all running process IDs.
+            DWORD pids[4096]; DWORD needed = 0;
+            if (!EnumProcesses(pids, sizeof(pids), &needed)) continue;
+            DWORD count = needed / sizeof(DWORD);
+
+            int applied = 0;
+            for (DWORD i = 0; i < count; ++i) {
+                DWORD pid = pids[i];
+                if (!pid) continue;
+
+                // Skip already-injected PIDs.
+                {
+                    std::lock_guard<std::mutex> lk(g_watchedPidsMutex);
+                    if (g_watchedPids.count(pid)) continue;
+                }
+
+                // Check process name against the watch list.
+                std::wstring procName = GetProcessName(pid);
+                if (procName.empty() || procName == L"<unknown>") continue;
+
+                bool matched = false;
+                for (const auto& w : watchNames) {
+                    if (_wcsicmp(procName.c_str(), w.c_str()) == 0) { matched = true; break; }
+                }
+                if (!matched) continue;
+
+                // Find all visible, titled top-level windows for this PID.
+                struct FindCtx { DWORD pid; std::vector<HWND> hwnds; };
+                FindCtx ctx = { pid };
+                EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+                    auto* c = reinterpret_cast<FindCtx*>(lp);
+                    DWORD wpid = 0;
+                    GetWindowThreadProcessId(hwnd, &wpid);
+                    if (wpid == c->pid && IsWindowVisible(hwnd)) {
+                        wchar_t t[8] = {};
+                        GetWindowTextW(hwnd, t, 8);
+                        if (t[0]) c->hwnds.push_back(hwnd);
+                    }
+                    return TRUE;
+                }, reinterpret_cast<LPARAM>(&ctx));
+
+                if (ctx.hwnds.empty()) continue; // process not ready yet; retry next tick
+
+                // Apply ExcludeFromCapture to each window of this process.
+                for (HWND hwnd : ctx.hwnds)
+                    InjectWDASetAffinity(hwnd, 0x00000011u, true);
+
+                // Mark PID as processed so we don't re-inject on subsequent ticks.
+                {
+                    std::lock_guard<std::mutex> lk(g_watchedPidsMutex);
+                    g_watchedPids.insert(pid);
+                }
+                ++applied;
+            }
+
+            if (g_hDlg && applied > 0)
+                PostMessage(g_hDlg, WM_APP_WATCH_APPLIED, static_cast<WPARAM>(applied), 0);
+        }
     }
 }
 
@@ -518,6 +615,7 @@ static const int s_allControls[] = {
     IDC_CHK_SHOW_PREVIEW,
     IDC_HIDE_APPS_LABEL, IDC_HIDE_APPS_SUB, IDC_WINDOW_LIST, IDC_SELECTED_INFO,
     IDC_GRP_OPS, IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_UNLOAD_DLL, IDC_CHK_AUTO_UNLOAD,
+    IDC_GRP_WATCH, IDC_WATCH_EDIT, IDC_BTN_WATCH_ADD, IDC_BTN_WATCH_REMOVE, IDC_WATCH_LIST,
     IDC_GRP_HIDDEN, IDC_HIDDEN_LIST,
     IDC_BTN_SHOW, IDC_STATUS_TEXT, IDC_CHK_SHOW_CURSOR,
 };
@@ -681,11 +779,14 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     // --- Bottom zone (computed bottom-up) ---
     const int statusH  = 16;
     const int hidBtnH  = btnH;
-    const int hidListH = 80;
+    const int hidListH = 65;
     const int hidLblH  = lblH;
     // Operations group: two rows – top row has 3 buttons, bottom row has the
     // auto-unload checkbox.
     const int opsH     = btnH + 4 + 14 + 8;  // button row + gap + checkbox row + padding
+    // Watch group: edit+buttons row + list.
+    const int watchListH = 45;
+    const int watchGrpH  = 14 + btnH + 4 + watchListH + 8;
 
     int y = H - mY;
 
@@ -693,6 +794,7 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     int hidBtnY  = y - hidBtnH;   y = hidBtnY  - DY;
     int hidListY = y - hidListH;  y = hidListY - DY;
     int hidLblY  = y - hidLblH;   y = hidLblY  - DY;
+    int watchY   = y - watchGrpH; y = watchY   - DY;
     int opsY     = y - opsH;      y = opsY     - DY;
     int selInfoY = y - lblH;      y = selInfoY - DY;
 
@@ -757,6 +859,21 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
         Move(IDC_BTN_UNLOAD_DLL, bx + (bw+4)*2, by, bw,  btnH);
         // Auto-unload checkbox below the buttons
         Move(IDC_CHK_AUTO_UNLOAD, bx, by + btnH + 4, listW - 16, 14);
+    }
+
+    // Process watch section
+    if (HWND hGrp = GetDlgItem(hDlg, IDC_GRP_WATCH))
+        MoveWindow(hGrp, mX, watchY, listW, watchGrpH, FALSE);
+    {
+        const int wx    = mX + 8;
+        const int wy    = watchY + 14;
+        const int addW  = 44;
+        const int remW  = 60;
+        const int editW = listW - 16 - 8 - addW - 4 - remW;
+        Move(IDC_WATCH_EDIT,         wx,                        wy, editW, btnH);
+        Move(IDC_BTN_WATCH_ADD,      wx + editW + 4,            wy, addW,  btnH);
+        Move(IDC_BTN_WATCH_REMOVE,   wx + editW + 4 + addW + 4, wy, remW,  btnH);
+        Move(IDC_WATCH_LIST,         wx, wy + btnH + 4, listW - 16, watchListH);
     }
 
     // Hidden windows section
@@ -836,7 +953,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         // Centre the dialog (portrait aspect ratio)
         {
-            const int dlgW = 480, dlgH = 680;
+            const int dlgW = 480, dlgH = 780;
             int scW = GetSystemMetrics(SM_CXSCREEN);
             int scH = GetSystemMetrics(SM_CYSCREEN);
             SetWindowPos(hDlg, nullptr,
@@ -886,12 +1003,28 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         // Apply owner-draw style to buttons for flat dark appearance
-        for (int btnId : {IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_UNLOAD_DLL, IDC_BTN_SHOW}) {
+        for (int btnId : {IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_UNLOAD_DLL, IDC_BTN_SHOW,
+                          IDC_BTN_WATCH_ADD, IDC_BTN_WATCH_REMOVE}) {
             HWND hBtn = GetDlgItem(hDlg, btnId);
             LONG_PTR style = GetWindowLongPtrW(hBtn, GWL_STYLE);
             style = (style & ~static_cast<LONG_PTR>(BS_TYPEMASK))
                   | static_cast<LONG_PTR>(BS_OWNERDRAW);
             SetWindowLongPtrW(hBtn, GWL_STYLE, style);
+        }
+
+        // Init process watch list view (single "Process" column)
+        {
+            HWND hList = GetDlgItem(hDlg, IDC_WATCH_LIST);
+            LVCOLUMNW lvc = {};
+            lvc.mask    = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            lvc.cx      = 300;
+            lvc.pszText = const_cast<LPWSTR>(L"Process (exe name)");
+            ListView_InsertColumn(hList, 0, &lvc);
+            ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            ListView_SetBkColor(hList, CLR_LIST_BG);
+            ListView_SetTextBkColor(hList, CLR_LIST_BG);
+            ListView_SetTextColor(hList, CLR_TEXT);
+            SetWindowTheme(hList, L"DarkMode_Explorer", nullptr);
         }
 
         // "Show desktop preview" checkbox – default on
@@ -914,6 +1047,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         // Request initial window enumeration (async).
         g_injectorChannel.send(InjectorEvent{InjectorEventType::Update});
+
+        // Process watch timer: fires every 2 s to check for new matching processes.
+        SetTimer(hDlg, IDT_WATCH, 2000, nullptr);
 
         // Start the initial screen preview if enabled (async).
         if (g_showDesktopPreview && !g_monitors.empty())
@@ -1144,7 +1280,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_GETMINMAXINFO:
     {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        mmi->ptMinTrackSize = { 360, 560 };
+        mmi->ptMinTrackSize = { 360, 700 };
         return TRUE;
     }
 
@@ -1376,6 +1512,55 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
             break;
 
+        case IDC_BTN_WATCH_ADD:
+        {
+            wchar_t buf[MAX_PATH] = {};
+            GetDlgItemTextW(hDlg, IDC_WATCH_EDIT, buf, MAX_PATH);
+            std::wstring name(buf);
+            // Trim whitespace
+            while (!name.empty() && iswspace(name.front())) name.erase(name.begin());
+            while (!name.empty() && iswspace(name.back()))  name.pop_back();
+            if (name.empty()) { SetStatus(hDlg, L"Enter an exe name to watch."); break; }
+
+            // Deduplicate (case-insensitive)
+            {
+                std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+                for (const auto& e : g_watchedExeNames)
+                    if (_wcsicmp(e.c_str(), name.c_str()) == 0) {
+                        SetStatus(hDlg, L"Already watching: " + name);
+                        goto done_watch_add;
+                    }
+                g_watchedExeNames.push_back(name);
+            }
+            {
+                HWND hList = GetDlgItem(hDlg, IDC_WATCH_LIST);
+                LVITEMW lvi = {};
+                lvi.mask    = LVIF_TEXT;
+                lvi.iItem   = ListView_GetItemCount(hList);
+                lvi.pszText = const_cast<LPWSTR>(name.c_str());
+                ListView_InsertItem(hList, &lvi);
+            }
+            SetDlgItemTextW(hDlg, IDC_WATCH_EDIT, L"");
+            SetStatus(hDlg, L"Watching: " + name);
+        done_watch_add:;
+            break;
+        }
+
+        case IDC_BTN_WATCH_REMOVE:
+        {
+            HWND hList = GetDlgItem(hDlg, IDC_WATCH_LIST);
+            int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+            if (sel < 0) { SetStatus(hDlg, L"No entry selected."); break; }
+            {
+                std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+                if (sel < static_cast<int>(g_watchedExeNames.size()))
+                    g_watchedExeNames.erase(g_watchedExeNames.begin() + sel);
+            }
+            ListView_DeleteItem(hList, sel);
+            SetStatus(hDlg, L"Watch entry removed.");
+            break;
+        }
+
         case IDM_TRAY_SHOW:
             if (IsWindowVisible(hDlg)) {
                 ShowWindow(hDlg, SW_HIDE);
@@ -1397,6 +1582,33 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             return TRUE;
         }
         break;
+    }
+
+    // --------------------------------------------------------------------
+    // Process watch timer: trigger a watch-check in the injector thread.
+    case WM_TIMER:
+        if (wParam == IDT_WATCH) {
+            bool hasEntries;
+            {
+                std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+                hasEntries = !g_watchedExeNames.empty();
+            }
+            if (hasEntries)
+                g_injectorChannel.send(InjectorEvent{InjectorEventType::WatchCheck});
+        }
+        return TRUE;
+
+    // --------------------------------------------------------------------
+    // Injector thread: watch rule applied – update status bar.
+    case WM_APP_WATCH_APPLIED:
+    {
+        WPARAM count = wParam;
+        SetStatus(hDlg, L"Watch: applied ExcludeCapture to "
+                        + std::to_wstring(count)
+                        + (count == 1 ? L" new process." : L" new processes."));
+        // Refresh the window list so the checkboxes reflect the new state.
+        g_injectorChannel.send(InjectorEvent{InjectorEventType::Update});
+        return TRUE;
     }
 
     // --------------------------------------------------------------------
@@ -1433,6 +1645,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
     // --------------------------------------------------------------------
     case WM_DESTROY:
+        KillTimer(hDlg, IDT_WATCH);
         // Shut down worker threads cleanly before releasing GDI resources.
         g_hDlg = nullptr;   // prevent PostMessage from racing during teardown
         g_injectorChannel.send(InjectorEvent{InjectorEventType::Quit});
