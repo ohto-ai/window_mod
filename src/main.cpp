@@ -96,7 +96,6 @@ static bool           g_trayAdded = false;
 // WM_WINDOWS_UPDATED), so it needs no separate lock.
 static CRITICAL_SECTION        g_pendingLock;
 static std::vector<WindowInfo> g_pendingWindows;
-static LONG                    g_activeEnumThreads = 0; // tracks running background threads
 
 // ============================================================================
 // Forward declarations
@@ -323,13 +322,11 @@ static void RefreshWindowListUI(HWND hDlg, bool preserveSelection = false)
 
 static DWORD WINAPI WindowEnumThreadProc(LPVOID)
 {
-    InterlockedIncrement(&g_activeEnumThreads);
     auto windows = EnumerateWindows();
     EnterCriticalSection(&g_pendingLock);
     g_pendingWindows = std::move(windows);
     LeaveCriticalSection(&g_pendingLock);
     if (g_hDlg) PostMessageW(g_hDlg, WM_WINDOWS_UPDATED, 0, 0);
-    InterlockedDecrement(&g_activeEnumThreads);
     return 0;
 }
 
@@ -337,7 +334,7 @@ static DWORD WINAPI WindowEnumThreadProc(LPVOID)
 static void TriggerWindowEnumeration()
 {
     HANDLE h = CreateThread(nullptr, 0, WindowEnumThreadProc, nullptr, 0, nullptr);
-    if (h) CloseHandle(h); // detach; lifetime tracked via g_activeEnumThreads
+    if (h) CloseHandle(h); // detach; thread posts WM_WINDOWS_UPDATED when done
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,13 +1136,12 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
     // --------------------------------------------------------------------
     case WM_DESTROY:
-        // Signal all background threads not to post any more messages.
+        // Signal background threads not to post any more messages.
+        // Do NOT wait for threads here: any background thread blocked in
+        // SendMessageW to our dialog cannot be unblocked while the UI thread
+        // is not pumping messages, so sleeping/waiting here would deadlock.
+        // The CRITICAL_SECTION is left intact; the OS cleans it on process exit.
         g_hDlg = nullptr;
-        // Wait up to 3 s for any running enumeration threads to finish before
-        // tearing down the critical section they depend on.
-        for (int i = 0; i < 300 && InterlockedCompareExchange(&g_activeEnumThreads, 0, 0) > 0; ++i)
-            Sleep(10);
-        DeleteCriticalSection(&g_pendingLock);
         if (g_hbrBg)            { DeleteObject(g_hbrBg);            g_hbrBg            = nullptr; }
         if (g_hFontBold)        { DeleteObject(g_hFontBold);        g_hFontBold        = nullptr; }
         if (g_hFontPlaceholder) { DeleteObject(g_hFontPlaceholder); g_hFontPlaceholder = nullptr; }
