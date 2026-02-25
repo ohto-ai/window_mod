@@ -57,3 +57,7 @@
 #define IDM_CTX_EXCLUDE         3004
 #define IDM_CTX_WATCH           3005
 #define IDM_CTX_UNLOAD_DLL      3006
+
+// Section separator decorations
+#define IDC_SEP_1               1090
+#define IDC_SEP_2               1091

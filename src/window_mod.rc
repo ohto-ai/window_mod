@@ -56,6 +56,12 @@ BEGIN
     // ---- Show desktop preview checkbox (positioned by OnSize, same row as preview label) -
     AUTOCHECKBOX "Show desktop preview", IDC_CHK_SHOW_PREVIEW, 7, 135, 140, 12
 
+    // ---- Section separators (SS_OWNERDRAW, positioned by OnSize) ---------------
+    // IDC_SEP_1: between preview/window sections
+    // IDC_SEP_2: between watch section and status bar
+    CONTROL "", IDC_SEP_1, "Static", 0x0000000D, 7, 154, 286, 1
+    CONTROL "", IDC_SEP_2, "Static", 0x0000000D, 7, 376, 286, 1
+
     // ---- Full-page placeholder shown when the app loses focus -----------------
     // SS_CENTER|SS_CENTERIMAGE = 0x0201; starts hidden (no WS_VISIBLE)
     CONTROL ":)", IDC_PLACEHOLDER_LABEL, "Static",

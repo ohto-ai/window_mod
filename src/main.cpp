@@ -114,16 +114,21 @@ struct CaptureEvent {
 };
 
 // ============================================================================
-// Dark theme colours
+// Dark theme colours  (Catppuccin Mocha palette)
 // ============================================================================
-static const COLORREF CLR_BG        = RGB(0x1e, 0x1e, 0x2e);
-static const COLORREF CLR_TEXT      = RGB(0xe0, 0xe0, 0xe0);
-static const COLORREF CLR_SUBTEXT   = RGB(0x88, 0x88, 0xaa);
-static const COLORREF CLR_LIST_BG   = RGB(0x22, 0x22, 0x35);
-static const COLORREF CLR_BTN_BG    = RGB(0x31, 0x32, 0x4a);
-static const COLORREF CLR_BTN_PRESS = RGB(0x45, 0x47, 0x6b);
-static const COLORREF CLR_BTN_BORDER= RGB(0x58, 0x5b, 0x70);
-static const COLORREF CLR_BTN_FOCUS = RGB(0x89, 0xb4, 0xfa);
+static const COLORREF CLR_BG         = RGB(0x1e, 0x1e, 0x2e);  // base
+static const COLORREF CLR_TEXT       = RGB(0xcd, 0xd6, 0xf4);  // text
+static const COLORREF CLR_SUBTEXT    = RGB(0xa6, 0xad, 0xc8);  // subtext1
+static const COLORREF CLR_STATUS     = RGB(0x6c, 0x70, 0x86);  // overlay1 (dim)
+static const COLORREF CLR_LIST_BG    = RGB(0x18, 0x18, 0x25);  // mantle
+static const COLORREF CLR_BTN_BG     = RGB(0x31, 0x32, 0x44);  // surface0
+static const COLORREF CLR_BTN_PRESS  = RGB(0x45, 0x47, 0x5a);  // surface1
+static const COLORREF CLR_BTN_BORDER = RGB(0x58, 0x5b, 0x70);  // surface2
+static const COLORREF CLR_BTN_FOCUS  = RGB(0x89, 0xb4, 0xfa);  // blue
+static const COLORREF CLR_ACCENT     = RGB(0x89, 0xb4, 0xfa);  // blue (section headers)
+static const COLORREF CLR_HIDDEN_BG  = RGB(0x20, 0x1c, 0x2e);  // subtle tint for hidden rows
+static const COLORREF CLR_HIDDEN_FG  = RGB(0xf3, 0x8b, 0xa8);  // red (hidden column text)
+static const COLORREF CLR_SEP        = RGB(0x45, 0x47, 0x5a);  // surface1 (separator line)
 
 // Preview geometry constants
 static const int PREVIEW_H_MIN   = 80;   // minimum preview height in pixels
@@ -749,10 +754,11 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 static const int s_allControls[] = {
     IDC_PREVIEW_LABEL, IDC_PREVIEW_SUBTEXT, IDC_PREVIEW_STATIC, IDC_TAB_SCREENS,
     IDC_CHK_SHOW_PREVIEW,
+    IDC_SEP_1,
     IDC_HIDE_APPS_LABEL, IDC_HIDE_APPS_SUB, IDC_WINDOW_LIST, IDC_SELECTED_INFO,
     IDC_CHK_AUTO_UNLOAD,
     IDC_GRP_WATCH, IDC_WATCH_EDIT, IDC_BTN_WATCH_ADD, IDC_BTN_WATCH_REMOVE, IDC_WATCH_LIST,
-    IDC_STATUS_TEXT, IDC_CHK_SHOW_CURSOR,
+    IDC_SEP_2, IDC_STATUS_TEXT, IDC_CHK_SHOW_CURSOR,
 };
 
 // Show a full-page ":)" placeholder when the app loses focus.
@@ -984,6 +990,11 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
 
     // Status bar
     Move(IDC_STATUS_TEXT, mX, statusY, listW, statusH);
+
+    // SEP_1: thin line between preview and window section
+    Move(IDC_SEP_1, mX, hideAppY - 3, listW, 1);
+    // SEP_2: thin line above status bar
+    Move(IDC_SEP_2, mX, statusY - 3, listW, 1);
 
     // Placeholder: always fill the entire client area (it is hidden when focused).
     if (HWND hPh = GetDlgItem(hDlg, IDC_PLACEHOLDER_LABEL))
@@ -1237,6 +1248,16 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             return TRUE;
         }
 
+        // ---- Thin section-separator lines ---------------------------------
+        if (di->CtlType == ODT_STATIC &&
+            (di->CtlID == IDC_SEP_1 || di->CtlID == IDC_SEP_2))
+        {
+            HBRUSH hBr = CreateSolidBrush(CLR_SEP);
+            FillRect(di->hDC, &di->rcItem, hBr);
+            DeleteObject(hBr);
+            return TRUE;
+        }
+
         // ---- Screen preview static control ----------------------------------
         if (di->CtlType == ODT_STATIC && di->CtlID == IDC_PREVIEW_STATIC) {
             HDC  hDC = di->hDC;
@@ -1319,11 +1340,15 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         HWND hCtrl = reinterpret_cast<HWND>(lParam);
         SetBkMode(hDC, TRANSPARENT);
         int ctlId = GetDlgCtrlID(hCtrl);
-        if (ctlId == IDC_PREVIEW_SUBTEXT ||
-            ctlId == IDC_HIDE_APPS_SUB  ||
-            ctlId == IDC_STATUS_TEXT)
-        {
+        if (ctlId == IDC_PREVIEW_LABEL || ctlId == IDC_HIDE_APPS_LABEL) {
+            // Section headers: accent blue
+            SetTextColor(hDC, CLR_ACCENT);
+        } else if (ctlId == IDC_PREVIEW_SUBTEXT || ctlId == IDC_HIDE_APPS_SUB) {
+            // Subtitle labels: subtext1
             SetTextColor(hDC, CLR_SUBTEXT);
+        } else if (ctlId == IDC_STATUS_TEXT || ctlId == IDC_SELECTED_INFO) {
+            // Status / info: overlay1 (dimmer)
+            SetTextColor(hDC, CLR_STATUS);
         } else {
             SetTextColor(hDC, CLR_TEXT);
         }
@@ -1411,6 +1436,41 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         // Main window list notifications
         if (pNMHDR->idFrom == IDC_WINDOW_LIST) {
+
+            // NM_CUSTOMDRAW: tint hidden rows (dimmed text + subtle bg + accent Hidden col)
+            if (pNMHDR->code == NM_CUSTOMDRAW) {
+                auto* pnmcd = reinterpret_cast<LPNMLVCUSTOMDRAW>(lParam);
+                DWORD stage = pnmcd->nmcd.dwDrawStage;
+                LRESULT ret = CDRF_DODEFAULT;
+
+                if (stage == CDDS_PREPAINT) {
+                    ret = CDRF_NOTIFYITEMDRAW;
+                } else if (stage == CDDS_ITEMPREPAINT) {
+                    int idx = static_cast<int>(pnmcd->nmcd.dwItemSpec);
+                    if (idx >= 0 && idx < static_cast<int>(g_windows.size())
+                        && g_windows[idx].isHidden)
+                    {
+                        bool sel = (pnmcd->nmcd.uItemState & CDIS_SELECTED) != 0;
+                        pnmcd->clrTextBk = CLR_HIDDEN_BG;
+                        if (!sel) {
+                            pnmcd->clrText = CLR_SUBTEXT;
+                            ret = CDRF_NOTIFYSUBITEMDRAW | CDRF_NEWFONT;
+                        }
+                    }
+                } else if ((stage & CDDS_SUBITEM) && (stage & CDDS_ITEMPREPAINT)) {
+                    int idx = static_cast<int>(pnmcd->nmcd.dwItemSpec);
+                    if (idx >= 0 && idx < static_cast<int>(g_windows.size())
+                        && g_windows[idx].isHidden)
+                    {
+                        pnmcd->clrTextBk = CLR_HIDDEN_BG;
+                        pnmcd->clrText   = (pnmcd->iSubItem == 3)
+                                            ? CLR_HIDDEN_FG : CLR_SUBTEXT;
+                        ret = CDRF_NEWFONT;
+                    }
+                }
+                SetWindowLongPtrW(hDlg, DWLP_MSGRESULT, ret);
+                return TRUE;
+            }
 
             if (pNMHDR->code == LVN_ITEMCHANGED && !g_populatingList) {
                 auto* pnm = reinterpret_cast<LPNMLISTVIEW>(lParam);
