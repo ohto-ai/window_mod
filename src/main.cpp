@@ -38,6 +38,7 @@
 #include "window_list.h"
 #include "window_ops.h"
 #include "injector.h"
+#include "logger.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -308,6 +309,8 @@ static void CaptureWorkerProc()
 // ============================================================================
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 {
+    InitLogger();
+
     g_hInst = hInstance;
 
     INITCOMMONCONTROLSEX icc = {};
@@ -1144,11 +1147,26 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                                 ? L"ExcludeCapture enabled: \"" + w.title + L"\""
                                 : L"ExcludeCapture disabled: \"" + w.title + L"\"");
                         } else {
-                            SetStatus(hDlg,
-                                L"Injection failed (error "
-                                + std::to_wstring(GetLastError())
-                                + L"). Run as Administrator and ensure "
-                                  L"wda_inject.dll is beside the exe.");
+                            DWORD err = GetLastError();
+                            std::wstring errMsg;
+                            if (err == ERROR_EXE_MACHINE_TYPE_MISMATCH) {
+#ifdef _WIN64
+                                errMsg = L"Injection failed: architecture mismatch \u2013 "
+                                         L"target is a 32-bit process. "
+                                         L"Use the x86 build of window_mod for 32-bit targets.";
+#else
+                                errMsg = L"Injection failed: architecture mismatch \u2013 "
+                                         L"target is a 64-bit process. "
+                                         L"Use the x64 build of window_mod for 64-bit targets.";
+#endif
+                            } else {
+                                errMsg = L"Injection failed (error "
+                                    + std::to_wstring(err)
+                                    + L"). Run as Administrator, ensure "
+                                      L"wda_inject.dll is beside the exe, "
+                                      L"and check window_mod.log for details.";
+                            }
+                            SetStatus(hDlg, errMsg);
                             // Revert the checkbox
                             g_populatingList = true;
                             HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);

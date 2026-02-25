@@ -5,6 +5,7 @@ set(SRC
     window_list.cpp
     window_ops.cpp
     injector.cpp
+    logger.cpp
     window_mod.rc
 )
 
@@ -32,6 +33,7 @@ target_link_libraries(window_mod PRIVATE
     shell32
     dwmapi
     uxtheme
+    spdlog::spdlog
 )
 
 # Copy the injection DLL next to the exe after build.
