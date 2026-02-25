@@ -633,7 +633,12 @@ static void UpdateSelectedInfo(HWND hDlg)
 
 static void CreateTrayIcon(HWND hDlg)
 {
-    HICON hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    HICON hIcon = static_cast<HICON>(
+        LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP_ICON),
+                   IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                   GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (!hIcon)
+        hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     g_nid        = {};
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd   = hDlg;
@@ -781,6 +786,18 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_INITDIALOG:
     {
         g_hDlg = hDlg;
+
+        // Set window title-bar icon (both large and small)
+        {
+            HICON hBig = static_cast<HICON>(
+                LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP_ICON),
+                           IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
+            HICON hSm  = static_cast<HICON>(
+                LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP_ICON),
+                           IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
+            if (hBig) SendMessageW(hDlg, WM_SETICON, ICON_BIG,   reinterpret_cast<LPARAM>(hBig));
+            if (hSm)  SendMessageW(hDlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hSm));
+        }
 
         // Dark title bar (Windows 10 v2004+ uses value 20; older builds used 19)
         BOOL dark = TRUE;

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 installer for Window Modifier
+  Build: wix build installer\window_mod.wxs -o installer\Output\WindowModifier.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="Window Modifier"
+           Manufacturer="ohto-ai"
+           Version="1.0.0"
+           UpgradeCode="66BCE3C3-0B3C-498E-875B-79CD31EC0F84"
+           Language="1033"
+           Codepage="1252"
+           Scope="perMachine">
+
+    <!-- Allow upgrading and prevent downgrades -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+
+    <!-- Embed the cab file directly into the MSI -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Application icon displayed in Add/Remove Programs -->
+    <Icon Id="AppIcon.ico" SourceFile="..\src\window_mod.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+    <Property Id="ARPHELPLINK"    Value="https://github.com/ohto-ai/window_mod" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/ohto-ai/window_mod" />
+
+    <Feature Id="ProductFeature" Title="Window Modifier" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentGroupRef Id="AppShortcuts" />
+    </Feature>
+
+  </Package>
+
+  <!-- ── Directory layout ──────────────────────────────────────────────────── -->
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Window Modifier" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppMenuFolder" Name="Window Modifier" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+  </Fragment>
+
+  <!-- ── Application files ─────────────────────────────────────────────────── -->
+  <Fragment>
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <!-- Main executable -->
+      <Component Id="Comp_window_mod_exe" Guid="*">
+        <File Id="window_mod.exe" Source="..\dist\window_mod.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- x64 injection helpers -->
+      <Component Id="Comp_wda_inject_dll" Guid="*">
+        <File Id="wda_inject.dll" Source="..\dist\wda_inject.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Comp_wda_launcher_x64" Guid="*">
+        <File Id="wda_launcher_x64.exe" Source="..\dist\wda_launcher_x64.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- x86 injection helpers (cross-arch) -->
+      <Component Id="Comp_wda_launcher_x86" Guid="*">
+        <File Id="wda_launcher_x86.exe" Source="..\dist\wda_launcher_x86.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="Comp_wda_inject_x86" Guid="*">
+        <File Id="wda_inject_x86.dll" Source="..\dist\wda_inject_x86.dll" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- ── Shortcuts ─────────────────────────────────────────────────────────── -->
+  <Fragment>
+    <ComponentGroup Id="AppShortcuts" Directory="AppMenuFolder">
+      <Component Id="Comp_StartMenuShortcut" Guid="*">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="Window Modifier"
+                  Description="Hide windows from screen capture"
+                  Target="[INSTALLFOLDER]window_mod.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon.ico" />
+        <RemoveFolder Id="RemoveAppMenuFolder" Directory="AppMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\ohto-ai\WindowModifier"
+                       Name="StartMenuInstalled"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

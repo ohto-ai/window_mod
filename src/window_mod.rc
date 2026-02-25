@@ -2,6 +2,9 @@
 #include <winresrc.h>
 #include "resource.h"
 
+// Application icon
+IDI_APP_ICON ICON "window_mod.ico"
+
 IDD_MAIN_DIALOG DIALOGEX 0, 0, 300, 400
 // Note: initial pixel size is set in WM_INITDIALOG (480 x 680); these dialog-unit
 // values are placeholder geometry that OnSize() overrides at runtime.
