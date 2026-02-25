@@ -21,4 +21,4 @@ elseif (MINGW)
     target_link_options(wda_launcher PRIVATE -municode -mconsole)
 endif()
 
-target_link_libraries(wda_launcher PRIVATE user32 kernel32)
+target_link_libraries(wda_launcher PRIVATE user32 kernel32 psapi)

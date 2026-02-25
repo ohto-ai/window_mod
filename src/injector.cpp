@@ -202,10 +202,13 @@ static DWORD RemoteLoadLibrary(HANDLE hProcess, const std::wstring& dllPath, DWO
 }
 
 // ---------------------------------------------------------------------------
-// Helper: spawn the opposite-arch launcher to inject dllPath into pid.
-// The shared memory is already set up by the caller.
+// Helper: spawn the opposite-arch launcher to inject (or unload) dllPath into pid.
+// inject mode (unloadOnly=false): launcher unloads existing copy then loads fresh.
+// unload mode (unloadOnly=true):  launcher only unloads the DLL.
+// The shared memory must be populated by the caller before calling inject mode.
 // Returns true on success.
-static bool SpawnLauncherForPid(DWORD pid, const std::wstring& dllPath)
+static bool SpawnLauncherForPid(DWORD pid, const std::wstring& dllPath,
+                                 bool unloadOnly = false)
 {
 #ifdef _WIN64
     const wchar_t* launcherName = L"wda_launcher_x86.exe";
@@ -221,10 +224,14 @@ static bool SpawnLauncherForPid(DWORD pid, const std::wstring& dllPath)
         return false;
     }
 
-    // Build command line: "<launcher>" <pid> "<dll_path>"
+    // Build command line.
+    // inject mode: "<launcher>" <pid> "<dll_path>"
+    // unload mode: "<launcher>" <pid> "<dll_path>" unload
     std::wstring cmdLine = L"\"" + launcherPath + L"\" "
                          + std::to_wstring(pid)
                          + L" \"" + dllPath + L"\"";
+    if (unloadOnly)
+        cmdLine += L" unload";
 
     spdlog::debug("SpawnLauncher: cmd = {}", WtoU8(cmdLine));
 
@@ -245,10 +252,12 @@ static bool SpawnLauncherForPid(DWORD pid, const std::wstring& dllPath)
     CloseHandle(pi.hThread);
 
     if (exitCode != 0) {
-        spdlog::error("SpawnLauncher: launcher exited with code {} for PID {}", exitCode, pid);
+        spdlog::error("SpawnLauncher: launcher exited with code {} for PID {}",
+                      exitCode, pid);
         return false;
     }
-    spdlog::debug("SpawnLauncher: launcher succeeded for PID {}", pid);
+    spdlog::debug("SpawnLauncher: {} succeeded for PID {}",
+                  unloadOnly ? "unload" : "inject", pid);
     return true;
 }
 
@@ -347,18 +356,12 @@ bool InjectWDASetAffinity(HWND hwnd, DWORD affinity, bool autoUnload)
                     break;
                 }
 
-                // Spawn the opposite-arch launcher which will LoadLibrary the
-                // opposite-arch DLL into the target process.
+                // Spawn the opposite-arch launcher which will:
+                // 1. FreeLibrary the DLL if already loaded (ensures DllMain fires fresh)
+                // 2. LoadLibraryW the DLL (triggers DllMain → SetWindowDisplayAffinity)
                 // Shared memory (with HWND + affinity) is already populated.
                 success = SpawnLauncherForPid(pid, oppDllPath);
                 if (!success) break;
-
-                // For auto-unload of the opposite-arch DLL we would need the
-                // opposite-arch launcher again (FreeLibrary path); leave for a
-                // future enhancement – the DLL is very small and transient.
-                // Skip the affinity verification below if the launcher succeeded.
-                // (The launcher doesn't support verification natively; we rely
-                //  on the DLL having run DllMain successfully.)
 
                 // Best-effort affinity check from this side.
                 typedef BOOL(WINAPI* PFN_GWDA)(HWND, DWORD*);
@@ -376,6 +379,14 @@ bool InjectWDASetAffinity(HWND hwnd, DWORD affinity, bool autoUnload)
                             spdlog::error("InjectWDASetAffinity: cross-arch affinity mismatch: "
                                           "expected {:#x}, got {:#x}", affinity, actual);
                     }
+                }
+
+                // Auto-unload: spawn launcher in unload-only mode so the DLL
+                // doesn't remain resident in the target process.
+                if (autoUnload && success) {
+                    spdlog::debug("InjectWDASetAffinity: auto-unloading cross-arch DLL from PID {}",
+                                  pid);
+                    SpawnLauncherForPid(pid, oppDllPath, /*unloadOnly=*/true);
                 }
                 break; // finished cross-arch path
             }
