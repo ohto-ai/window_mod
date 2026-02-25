@@ -2,6 +2,9 @@
 #include <winresrc.h>
 #include "resource.h"
 
+// Application icon
+IDI_APP_ICON ICON "window_mod.ico"
+
 IDD_MAIN_DIALOG DIALOGEX 0, 0, 300, 400
 // Note: initial pixel size is set in WM_INITDIALOG (480 x 680); these dialog-unit
 // values are placeholder geometry that OnSize() overrides at runtime.
@@ -49,10 +52,10 @@ BEGIN
     // ---- Status bar -----------------------------------------------------------
     LTEXT   "Ready", IDC_STATUS_TEXT, 7, 382, 286, 8
 
-    // ---- Cursor checkbox (positioned by OnSize, initially near preview label) --
+    // ---- Cursor checkbox (positioned by OnSize, same row as preview label) ---
     AUTOCHECKBOX "Show cursor in preview", IDC_CHK_SHOW_CURSOR, 160, 7, 133, 12
 
-    // ---- Show desktop preview checkbox (positioned by OnSize) -----------------
+    // ---- Show desktop preview checkbox (positioned by OnSize, same row as preview label) -
     AUTOCHECKBOX "Show desktop preview", IDC_CHK_SHOW_PREVIEW, 7, 135, 140, 12
 
     // ---- Full-page placeholder shown when the app loses focus -----------------

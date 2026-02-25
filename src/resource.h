@@ -1,5 +1,8 @@
 #pragma once
 
+// Application icon
+#define IDI_APP_ICON            100
+
 // Dialog IDs
 #define IDD_MAIN_DIALOG         101
 
