@@ -6,7 +6,7 @@
 IDI_APP_ICON ICON "window_mod.ico"
 
 IDD_MAIN_DIALOG DIALOGEX 0, 0, 300, 400
-// Note: initial pixel size is set in WM_INITDIALOG (480 x 680); these dialog-unit
+// Note: initial pixel size is set in WM_INITDIALOG (480 x 780); these dialog-unit
 // values are placeholder geometry that OnSize() overrides at runtime.
 STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME
 CAPTION "Window Modifier"
@@ -41,8 +41,18 @@ BEGIN
     PUSHBUTTON "Unload DLL",     IDC_BTN_UNLOAD_DLL, 186, 276,  82, 13
     AUTOCHECKBOX "Auto-unload DLL", IDC_CHK_AUTO_UNLOAD, 14, 290, 120, 12
 
+    // ---- Process watch section ------------------------------------------------
+    GROUPBOX "Process Watch", IDC_GRP_WATCH, 7, 298, 286, 60
+    EDITTEXT  IDC_WATCH_EDIT,              14, 313, 195, 13, ES_AUTOHSCROLL
+    PUSHBUTTON "Add",    IDC_BTN_WATCH_ADD,    212, 313,  30, 13
+    PUSHBUTTON "Remove", IDC_BTN_WATCH_REMOVE, 245, 313,  41, 13
+    CONTROL "", IDC_WATCH_LIST, "SysListView32",
+                LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+                WS_BORDER | WS_TABSTOP,
+                14, 330, 272, 23
+
     // ---- Hidden windows list --------------------------------------------------
-    LTEXT   "Hidden Windows:", IDC_GRP_HIDDEN, 7, 298, 80, 8
+    LTEXT   "Hidden Windows:", IDC_GRP_HIDDEN, 7, 368, 80, 8
     CONTROL "", IDC_HIDDEN_LIST, "SysListView32",
                 LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
                 WS_BORDER | WS_TABSTOP,
