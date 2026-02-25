@@ -33,6 +33,7 @@ target_link_libraries(window_mod PRIVATE
     shell32
     dwmapi
     uxtheme
+    advapi32
     spdlog::spdlog
 )
 
