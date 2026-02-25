@@ -6,8 +6,8 @@
  *  - Screen preview with per-monitor tab switching and "Show desktop preview" toggle
  *  - Enumerate visible windows (including own); checkbox per row toggles WDA_EXCLUDEFROMCAPTURE
  *  - Window list refreshed asynchronously via injector worker thread on focus gain
- *  - Screen preview captured asynchronously via capture worker thread on focus gain /
- *    monitor tab change / "Show desktop preview" toggle
+ *  - Screen preview captured continuously (~5 fps) via capture worker thread;
+ *    starts/stops on focus gain/loss, monitor tab change, "Show desktop preview" toggle
  *  - Two independent background threads (injector + capture) keep the UI responsive
  *  - TopMost toggle button (selected window)
  *  - Hide windows (SW_HIDE) tracked in a separate list for recovery
@@ -32,6 +32,7 @@
 #include <condition_variable>
 #include <deque>
 #include <atomic>
+#include <chrono>
 
 #include "resource.h"
 #include "window_list.h"
@@ -69,6 +70,17 @@ public:
         std::unique_lock<std::mutex> lk(mtx_);
         cv_.wait(lk, [this]{ return !q_.empty() || closed_; });
         if (q_.empty()) return false;
+        out = std::move(q_.front());
+        q_.pop_front();
+        return true;
+    }
+    // Waits up to `ms` milliseconds for an item.
+    // Returns true if an item was received, false on timeout or channel close.
+    bool recv_timeout(T& out, unsigned ms) {
+        std::unique_lock<std::mutex> lk(mtx_);
+        bool ready = cv_.wait_for(lk, std::chrono::milliseconds(ms),
+                                  [this]{ return !q_.empty() || closed_; });
+        if (!ready || q_.empty()) return false;
         out = std::move(q_.front());
         q_.pop_front();
         return true;
@@ -160,14 +172,17 @@ static std::mutex                g_pendingWindowsMutex;
 static std::vector<WindowInfo>   g_pendingWindows;
 
 // ── Capture worker thread ───────────────────────────────────────────────────
-// Receives CaptureEvent::Capture, performs a BitBlt screen capture, stores the
-// HBITMAP in g_pendingPreviewBmp, then posts WM_APP_PREVIEW_READY to the dialog.
-// CaptureEvent::StopCapture discards any in-progress capture (no-op here since
-// BitBlt is a single-shot operation).
+// Continuously captures frames (via BitBlt) while in capturing state and posts
+// WM_APP_PREVIEW_READY to the dialog for each frame.
+// CaptureEvent::Capture starts/restarts continuous capture for a given monitor rect.
+// CaptureEvent::StopCapture stops the continuous loop.
 static Channel<CaptureEvent>    g_captureChannel;
 static std::thread               g_captureThread;
 static std::mutex                g_pendingPreviewMutex;
 static HBITMAP                   g_pendingPreviewBmp = nullptr;
+// Mirrors IDC_CHK_SHOW_CURSOR; updated atomically so the capture thread can
+// read it on every frame without touching the UI thread.
+static std::atomic<bool>         g_captureShowCursor{false};
 
 // ============================================================================
 // Forward declarations
@@ -197,47 +212,40 @@ static void InjectorWorkerProc()
 
 // ============================================================================
 // Capture worker thread
-// Handles CaptureEvent::Capture: performs a BitBlt screenshot and notifies
-// the UI thread via WM_APP_PREVIEW_READY.
-// CaptureEvent::StopCapture: releases any pending bitmap (no streaming to stop).
+// Implements a continuous BitBlt capture loop, analogous to Invisiwind's
+// ScreenCapture::start_free_threaded streaming model:
+//   • CaptureEvent::Capture  → enter/restart continuous capture for the given rect
+//   • CaptureEvent::StopCapture → exit continuous capture, discard pending bitmap
+//   • CaptureEvent::Quit     → terminate thread
+//
+// While capturing, a frame is taken every ~200 ms (≈5 fps) and posted to the
+// UI thread via WM_APP_PREVIEW_READY; the cursor overlay is drawn when
+// g_captureShowCursor is set.  Between frames the thread waits on the channel
+// so that a new event (monitor switch, stop, quit) is acted on immediately.
 // ============================================================================
 static void CaptureWorkerProc()
 {
-    CaptureEvent evt;
-    while (g_captureChannel.recv(evt)) {
-        if (evt.type == CaptureEventType::Quit) break;
+    bool capturing  = false;
+    RECT activeRect = {};
 
-        if (evt.type == CaptureEventType::StopCapture) {
-            // Discard any pending (not-yet-consumed) preview bitmap.
-            HBITMAP old = nullptr;
-            {
-                std::lock_guard<std::mutex> lk(g_pendingPreviewMutex);
-                old = g_pendingPreviewBmp;
-                g_pendingPreviewBmp = nullptr;
-            }
-            if (old) DeleteObject(old);
-            continue;
-        }
-
-        // CaptureEventType::Capture
-        const RECT& mr = evt.monitorRect;
-        int w = mr.right - mr.left;
-        int h = mr.bottom - mr.top;
-        if (w <= 0 || h <= 0) continue;
+    auto takeFrame = [&]() {
+        int w = activeRect.right - activeRect.left;
+        int h = activeRect.bottom - activeRect.top;
+        if (w <= 0 || h <= 0) return;
 
         HDC     hScreen = GetDC(nullptr);
         HDC     hMem    = CreateCompatibleDC(hScreen);
         HBITMAP hBmp    = CreateCompatibleBitmap(hScreen, w, h);
         HGDIOBJ old     = SelectObject(hMem, hBmp);
-        BitBlt(hMem, 0, 0, w, h, hScreen, mr.left, mr.top, SRCCOPY | CAPTUREBLT);
+        BitBlt(hMem, 0, 0, w, h, hScreen, activeRect.left, activeRect.top, SRCCOPY | CAPTUREBLT);
 
-        if (evt.showCursor) {
+        if (g_captureShowCursor.load()) {
             CURSORINFO ci = {};
             ci.cbSize = sizeof(ci);
             if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor) {
                 DrawIconEx(hMem,
-                    ci.ptScreenPos.x - mr.left,
-                    ci.ptScreenPos.y - mr.top,
+                    ci.ptScreenPos.x - activeRect.left,
+                    ci.ptScreenPos.y - activeRect.top,
                     ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
             }
         }
@@ -246,7 +254,7 @@ static void CaptureWorkerProc()
         DeleteDC(hMem);
         ReleaseDC(nullptr, hScreen);
 
-        // Store as pending; replace any unconsumed frame (bounded-1 behaviour).
+        // Replace any unconsumed frame (bounded-1 behaviour).
         HBITMAP discarded = nullptr;
         {
             std::lock_guard<std::mutex> lk(g_pendingPreviewMutex);
@@ -257,6 +265,41 @@ static void CaptureWorkerProc()
 
         if (g_hDlg)
             PostMessage(g_hDlg, WM_APP_PREVIEW_READY, 0, 0);
+    };
+
+    while (true) {
+        CaptureEvent evt;
+        bool hasEvent;
+
+        if (capturing) {
+            // Take a frame, then wait up to 200 ms for the next event.
+            takeFrame();
+            hasEvent = g_captureChannel.recv_timeout(evt, 200);
+            if (!hasEvent) continue;  // timeout → capture another frame
+        } else {
+            // Idle: block indefinitely until an event arrives.
+            hasEvent = g_captureChannel.recv(evt);
+            if (!hasEvent) break;  // channel closed
+        }
+
+        if (evt.type == CaptureEventType::Quit) break;
+
+        if (evt.type == CaptureEventType::StopCapture) {
+            capturing = false;
+            // Discard any pending (not-yet-consumed) preview bitmap.
+            HBITMAP old = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(g_pendingPreviewMutex);
+                old = g_pendingPreviewBmp;
+                g_pendingPreviewBmp = nullptr;
+            }
+            if (old) DeleteObject(old);
+        } else if (evt.type == CaptureEventType::Capture) {
+            // Start or restart continuous capture (e.g. monitor switched).
+            capturing  = true;
+            activeRect = evt.monitorRect;
+            // Next iteration will call takeFrame() immediately.
+        }
     }
 }
 
@@ -323,8 +366,8 @@ static void EnumerateMonitors()
 // ============================================================================
 
 // Send a Capture event to the capture worker thread.
-// Snapshots the current cursor-checkbox state so the thread doesn't need to
-// touch the UI.
+// The cursor-overlay state is tracked via g_captureShowCursor (atomic) so
+// the worker reads the up-to-date value on every frame without touching the UI.
 static void SendCaptureEvent(int monitorIdx)
 {
     if (monitorIdx < 0 || monitorIdx >= static_cast<int>(g_monitors.size()))
@@ -332,8 +375,6 @@ static void SendCaptureEvent(int monitorIdx)
     CaptureEvent evt;
     evt.type        = CaptureEventType::Capture;
     evt.monitorRect = g_monitors[monitorIdx];
-    evt.showCursor  = (g_hDlg &&
-                       IsDlgButtonChecked(g_hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
     g_captureChannel.send(evt);
 }
 
@@ -815,6 +856,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         g_showDesktopPreview = true;
         CheckDlgButton(hDlg, IDC_CHK_SHOW_PREVIEW,
                        g_showDesktopPreview ? BST_CHECKED : BST_UNCHECKED);
+        // "Show cursor in preview" checkbox – default off; sync the atomic.
+        g_captureShowCursor.store(
+            IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
 
         // Tray icon
         CreateTrayIcon(hDlg);
@@ -1245,6 +1289,13 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             break;
         }
+
+        case IDC_CHK_SHOW_CURSOR:
+            // Keep the atomic in sync so the capture worker reads the new value
+            // on the very next frame without any channel round-trip.
+            g_captureShowCursor.store(
+                IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
+            break;
 
         case IDM_TRAY_SHOW:
             if (IsWindowVisible(hDlg)) {
