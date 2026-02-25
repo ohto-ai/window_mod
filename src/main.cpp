@@ -163,6 +163,7 @@ static bool g_autoUnloadDll = true;
 
 // Dark theme GDI resources
 static HBRUSH g_hbrBg            = nullptr;
+static HBRUSH g_hbrListBg        = nullptr;
 static HFONT  g_hFontBold        = nullptr;
 static HFONT  g_hFontPlaceholder = nullptr; // large font for the focus-lost screen
 
@@ -402,6 +403,154 @@ static void CaptureWorkerProc()
             // Next iteration will call takeFrame() immediately.
         }
     }
+}
+
+// ============================================================================
+// Settings persistence (HKCU\Software\WindowModifier)
+// ============================================================================
+static const wchar_t* const REG_APP_KEY = L"Software\\WindowModifier";
+
+static void SaveSettings()
+{
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_APP_KEY, 0, nullptr,
+            REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr)
+        != ERROR_SUCCESS)
+        return;
+
+    DWORD showPreview = g_showDesktopPreview ? 1u : 0u;
+    RegSetValueExW(hKey, L"ShowDesktopPreview", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&showPreview), sizeof(showPreview));
+
+    DWORD showCursor = g_captureShowCursor.load() ? 1u : 0u;
+    RegSetValueExW(hKey, L"ShowCursorInPreview", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&showCursor), sizeof(showCursor));
+
+    // Build REG_MULTI_SZ: each name null-terminated, list ends with extra null.
+    {
+        std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+        std::vector<wchar_t> buf;
+        for (const auto& name : g_watchedExeNames) {
+            buf.insert(buf.end(), name.begin(), name.end());
+            buf.push_back(L'\0');
+        }
+        buf.push_back(L'\0');
+        RegSetValueExW(hKey, L"WatchedExeNames", 0, REG_MULTI_SZ,
+            reinterpret_cast<const BYTE*>(buf.data()),
+            static_cast<DWORD>(buf.size() * sizeof(wchar_t)));
+    }
+
+    RegCloseKey(hKey);
+}
+
+static void LoadSettings(HWND hDlg)
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_APP_KEY,
+            0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return;
+
+    // ShowDesktopPreview
+    {
+        DWORD val = 1, size = sizeof(val), type = 0;
+        if (RegQueryValueExW(hKey, L"ShowDesktopPreview", nullptr, &type,
+                reinterpret_cast<BYTE*>(&val), &size) == ERROR_SUCCESS
+            && type == REG_DWORD)
+        {
+            g_showDesktopPreview = (val != 0);
+            CheckDlgButton(hDlg, IDC_CHK_SHOW_PREVIEW,
+                g_showDesktopPreview ? BST_CHECKED : BST_UNCHECKED);
+            // Show/hide preview-related controls to match the loaded state
+            int sw = g_showDesktopPreview ? SW_SHOW : SW_HIDE;
+            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_SUBTEXT), sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_STATIC),  sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_TAB_SCREENS),     sw);
+            ShowWindow(GetDlgItem(hDlg, IDC_CHK_SHOW_CURSOR), sw);
+        }
+    }
+
+    // ShowCursorInPreview
+    {
+        DWORD val = 0, size = sizeof(val), type = 0;
+        if (RegQueryValueExW(hKey, L"ShowCursorInPreview", nullptr, &type,
+                reinterpret_cast<BYTE*>(&val), &size) == ERROR_SUCCESS
+            && type == REG_DWORD)
+        {
+            g_captureShowCursor.store(val != 0);
+            CheckDlgButton(hDlg, IDC_CHK_SHOW_CURSOR,
+                val ? BST_CHECKED : BST_UNCHECKED);
+        }
+    }
+
+    // WatchedExeNames (REG_MULTI_SZ)
+    {
+        DWORD type = 0, size = 0;
+        if (RegQueryValueExW(hKey, L"WatchedExeNames", nullptr, &type,
+                nullptr, &size) == ERROR_SUCCESS
+            && type == REG_MULTI_SZ && size > 0)
+        {
+            std::vector<wchar_t> buf(size / sizeof(wchar_t));
+            if (RegQueryValueExW(hKey, L"WatchedExeNames", nullptr, nullptr,
+                    reinterpret_cast<BYTE*>(buf.data()), &size) == ERROR_SUCCESS)
+            {
+                HWND hList = GetDlgItem(hDlg, IDC_WATCH_LIST);
+                std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+                g_watchedExeNames.clear();
+                for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
+                    std::wstring name(p);
+                    g_watchedExeNames.push_back(name);
+                    LVITEMW lvi = {};
+                    lvi.mask    = LVIF_TEXT;
+                    lvi.iItem   = ListView_GetItemCount(hList);
+                    lvi.pszText = const_cast<LPWSTR>(name.c_str());
+                    ListView_InsertItem(hList, &lvi);
+                }
+            }
+        }
+    }
+
+    RegCloseKey(hKey);
+}
+
+// ============================================================================
+// Auto-start helpers (HKCU\...\Run registry key)
+// ============================================================================
+
+static bool IsAutoStartEnabled()
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return false;
+    DWORD type = 0, size = 0;
+    bool exists = (RegQueryValueExW(hKey, L"WindowModifier",
+                       nullptr, &type, nullptr, &size) == ERROR_SUCCESS);
+    RegCloseKey(hKey);
+    return exists;
+}
+
+static bool SetAutoStart(bool enable)
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0, KEY_WRITE, &hKey) != ERROR_SUCCESS)
+        return false;
+    bool ok;
+    if (enable) {
+        wchar_t path[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        ok = (RegSetValueExW(hKey, L"WindowModifier", 0, REG_SZ,
+                  reinterpret_cast<const BYTE*>(path),
+                  static_cast<DWORD>((wcslen(path) + 1) * sizeof(wchar_t)))
+              == ERROR_SUCCESS);
+    } else {
+        LSTATUS st = RegDeleteValueW(hKey, L"WindowModifier");
+        ok = (st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND);
+    }
+    RegCloseKey(hKey);
+    return ok;
 }
 
 // ============================================================================
@@ -782,8 +931,9 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     const int hidListH = 65;
     const int hidLblH  = lblH;
     // Operations group: two rows – top row has 3 buttons, bottom row has the
-    // auto-unload checkbox.
-    const int opsH     = btnH + 4 + 14 + 8;  // button row + gap + checkbox row + padding
+    // auto-unload checkbox.  Use 14 px top-padding (same as the Watch group)
+    // so that the group-box title text is never covered by the buttons.
+    const int opsH     = 14 + btnH + 4 + 14 + 8;  // title space + button row + gap + checkbox row + padding
     // Watch group: edit+buttons row + list.
     const int watchListH = 45;
     const int watchGrpH  = 14 + btnH + 4 + watchListH + 8;
@@ -852,7 +1002,7 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
         MoveWindow(hGrp, mX, opsY, listW, opsH, FALSE);
     {
         const int bx  = mX + 8;
-        const int by  = opsY + 6;
+        const int by  = opsY + 14;  // start below the group-box title
         const int bw  = (listW - 16 - 8) / 3;  // three equal-width buttons
         Move(IDC_BTN_HIDE,       bx,           by, bw,   btnH);
         Move(IDC_BTN_TOPMOST,    bx + bw + 4,  by, bw,   btnH);
@@ -874,6 +1024,25 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
         Move(IDC_BTN_WATCH_ADD,      wx + editW + 4,            wy, addW,  btnH);
         Move(IDC_BTN_WATCH_REMOVE,   wx + editW + 4 + addW + 4, wy, remW,  btnH);
         Move(IDC_WATCH_LIST,         wx, wy + btnH + 4, listW - 16, watchListH);
+        // Stretch the single Process column to fill the list width
+        if (HWND hWatchList = GetDlgItem(hDlg, IDC_WATCH_LIST)) {
+            int colW = (listW - 16) - GetSystemMetrics(SM_CXVSCROLL) - 2;
+            if (colW > 0) ListView_SetColumnWidth(hWatchList, 0, colW);
+        }
+    }
+
+    // Stretch the Title column of the main window list to fill available width
+    if (HWND hWinList = GetDlgItem(hDlg, IDC_WINDOW_LIST)) {
+        int scrollW = GetSystemMetrics(SM_CXVSCROLL);
+        int titleW  = listW - 90 - 60 - scrollW - 4;
+        if (titleW > 40) ListView_SetColumnWidth(hWinList, 0, titleW);
+    }
+
+    // Stretch the Title column of the hidden windows list to fill available width
+    if (HWND hHidList = GetDlgItem(hDlg, IDC_HIDDEN_LIST)) {
+        int scrollW = GetSystemMetrics(SM_CXVSCROLL);
+        int titleW  = listW - 90 - 50 - 80 - scrollW - 4;
+        if (titleW > 40) ListView_SetColumnWidth(hHidList, 0, titleW);
     }
 
     // Hidden windows section
@@ -924,7 +1093,8 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             DwmSetWindowAttribute(hDlg, 19, &dark, sizeof(dark));
 
         // Dark theme brush
-        g_hbrBg = CreateSolidBrush(CLR_BG);
+        g_hbrBg    = CreateSolidBrush(CLR_BG);
+        g_hbrListBg = CreateSolidBrush(CLR_LIST_BG);
 
         // Bold font for section headers
         NONCLIENTMETRICSW ncm = {};
@@ -1037,6 +1207,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         // "Auto-unload DLL" checkbox – default on.
         g_autoUnloadDll = true;
         CheckDlgButton(hDlg, IDC_CHK_AUTO_UNLOAD, BST_CHECKED);
+
+        // Load persisted settings (may override the defaults set above).
+        LoadSettings(hDlg);
 
         // Tray icon
         CreateTrayIcon(hDlg);
@@ -1245,6 +1418,16 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     // --------------------------------------------------------------------
+    // Dark theme: edit control (text box) background
+    case WM_CTLCOLOREDIT:
+    {
+        HDC hDC = reinterpret_cast<HDC>(wParam);
+        SetBkColor(hDC, CLR_LIST_BG);
+        SetTextColor(hDC, CLR_TEXT);
+        return reinterpret_cast<INT_PTR>(g_hbrListBg);
+    }
+
+    // --------------------------------------------------------------------
     case WM_TRAYICON:
     {
         switch (lParam)
@@ -1256,6 +1439,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             HMENU hMenu = CreatePopupMenu();
             AppendMenuW(hMenu, MF_STRING, IDM_TRAY_SHOW,
                 IsWindowVisible(hDlg) ? L"Hide Window" : L"Show Window");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hMenu, MF_STRING | (IsAutoStartEnabled() ? MF_CHECKED : 0),
+                IDM_TRAY_AUTOSTART, L"Start on Boot");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(hMenu, MF_STRING, IDM_TRAY_EXIT, L"Exit");
             SetForegroundWindow(hDlg);
@@ -1502,6 +1688,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
                 SendStopCaptureEvent();
             }
+            SaveSettings();
             break;
         }
 
@@ -1510,6 +1697,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             // on the very next frame without any channel round-trip.
             g_captureShowCursor.store(
                 IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_CURSOR) == BST_CHECKED);
+            SaveSettings();
             break;
 
         case IDC_BTN_WATCH_ADD:
@@ -1542,6 +1730,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             SetDlgItemTextW(hDlg, IDC_WATCH_EDIT, L"");
             SetStatus(hDlg, L"Watching: " + name);
+            SaveSettings();
         done_watch_add:;
             break;
         }
@@ -1558,6 +1747,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             ListView_DeleteItem(hList, sel);
             SetStatus(hDlg, L"Watch entry removed.");
+            SaveSettings();
             break;
         }
 
@@ -1568,6 +1758,10 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                 ShowWindow(hDlg, SW_SHOW);
                 SetForegroundWindow(hDlg);
             }
+            break;
+
+        case IDM_TRAY_AUTOSTART:
+            SetAutoStart(!IsAutoStartEnabled());
             break;
 
         case IDM_TRAY_EXIT:
@@ -1658,6 +1852,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             if (g_pendingPreviewBmp) { DeleteObject(g_pendingPreviewBmp); g_pendingPreviewBmp = nullptr; }
         }
         if (g_hbrBg)            { DeleteObject(g_hbrBg);            g_hbrBg            = nullptr; }
+        if (g_hbrListBg)        { DeleteObject(g_hbrListBg);        g_hbrListBg        = nullptr; }
         if (g_hFontBold)        { DeleteObject(g_hFontBold);        g_hFontBold        = nullptr; }
         if (g_hFontPlaceholder) { DeleteObject(g_hFontPlaceholder); g_hFontPlaceholder = nullptr; }
         if (g_previewBmp)       { DeleteObject(g_previewBmp);       g_previewBmp       = nullptr; }

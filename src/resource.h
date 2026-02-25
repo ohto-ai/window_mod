@@ -48,3 +48,4 @@
 #define WM_TRAYICON             (WM_USER + 1)
 #define IDM_TRAY_SHOW           2001
 #define IDM_TRAY_EXIT           2002
+#define IDM_TRAY_AUTOSTART      2003
