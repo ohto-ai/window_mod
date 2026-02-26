@@ -1,12 +1,5 @@
 #include "window_ops.h"
 
-#ifndef WDA_NONE
-#define WDA_NONE 0x00000000
-#endif
-#ifndef WDA_EXCLUDEFROMCAPTURE
-#define WDA_EXCLUDEFROMCAPTURE 0x00000011
-#endif
-
 bool SetWindowTopMost(HWND hwnd, bool topMost)
 {
     HWND insertAfter = topMost ? HWND_TOPMOST : HWND_NOTOPMOST;

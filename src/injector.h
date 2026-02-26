@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include "window_ops.h"
 
 /// Inject wda_inject.dll into the process that owns `hwnd` and call
 /// SetWindowDisplayAffinity(hwnd, affinity) from within that process
@@ -23,5 +24,5 @@ bool UnloadInjectedDll(HWND hwnd);
 /// Convenience wrapper – sets WDA_EXCLUDEFROMCAPTURE.
 inline bool InjectWDAExcludeFromCapture(HWND hwnd, bool autoUnload = true)
 {
-    return InjectWDASetAffinity(hwnd, 0x00000011 /* WDA_EXCLUDEFROMCAPTURE */, autoUnload);
+    return InjectWDASetAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE, autoUnload);
 }
