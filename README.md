@@ -81,18 +81,25 @@ cmake --build build
 
 ```
 window_mod/
-├── CMakeLists.txt           Root CMake
+├── CMakeLists.txt              Root CMake
 ├── src/
 │   ├── CMakeLists.txt
-│   ├── main.cpp             WinMain + dialog procedure
-│   ├── window_list.h/.cpp   Window enumeration (EnumWindows)
-│   ├── window_ops.h/.cpp    TopMost / Hide / Show operations
-│   ├── injector.h/.cpp      DLL-injection logic
-│   ├── resource.h           Control / dialog IDs
-│   └── window_mod.rc        Dialog template
-└── inject_dll/
-    ├── CMakeLists.txt
-    └── dllmain.cpp          wda_inject.dll – calls SetWindowDisplayAffinity
+│   ├── main.cpp                WinMain + dialog procedure
+│   ├── window_list.h/.cpp      Window enumeration (EnumWindows)
+│   ├── window_ops.h/.cpp       TopMost / Hide / Show operations
+│   ├── injector.h/.cpp         DLL-injection logic
+│   ├── logger.h/.cpp           Logging helpers (spdlog wrapper)
+│   ├── resource.h              Control / dialog IDs
+│   └── window_mod.rc           Dialog template
+├── inject_dll/
+│   ├── CMakeLists.txt
+│   └── dllmain.cpp             wda_inject.dll – calls SetWindowDisplayAffinity
+├── inject_launcher/
+│   ├── CMakeLists.txt
+│   └── launcher_main.cpp       wda_launcher.exe – cross-arch injection helper
+└── installer/
+    ├── window_mod.iss          Inno Setup installer script
+    └── window_mod.wxs          WiX installer script
 ```
 
 ---
