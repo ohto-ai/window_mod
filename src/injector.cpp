@@ -5,6 +5,16 @@
 #include <psapi.h>
 #include <spdlog/spdlog.h>
 
+// Helper: call GetWindowDisplayAffinity via a lazily-initialized function pointer.
+// Returns FALSE if the API is unavailable (pre-Windows 7) or the call fails.
+static BOOL GetWindowDisplayAffinityW_Safe(HWND hwnd, DWORD* pAffinity)
+{
+    typedef BOOL(WINAPI* PFN_GWDA)(HWND, DWORD*);
+    static PFN_GWDA pfn = reinterpret_cast<PFN_GWDA>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetWindowDisplayAffinity"));
+    return pfn ? pfn(hwnd, pAffinity) : FALSE;
+}
+
 // Named shared-memory object used to pass the target HWND and desired affinity
 // to the injected DLL.  The same name/layout is referenced in inject_dll/dllmain.cpp.
 #define WDA_SHARED_MEM_NAME  L"Local\\WdaInjectHwnd_WindowMod"
@@ -364,21 +374,15 @@ bool InjectWDASetAffinity(HWND hwnd, DWORD affinity, bool autoUnload)
                 if (!success) break;
 
                 // Best-effort affinity check from this side.
-                typedef BOOL(WINAPI* PFN_GWDA)(HWND, DWORD*);
-                static PFN_GWDA pfnGetWDA2 = reinterpret_cast<PFN_GWDA>(
-                    GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                                   "GetWindowDisplayAffinity"));
-                if (pfnGetWDA2) {
-                    DWORD actual = 0xFFFFFFFF;
-                    if (pfnGetWDA2(hwnd, &actual)) {
-                        success = (actual == affinity);
-                        if (success)
-                            spdlog::info("InjectWDASetAffinity: verified (cross-arch) – "
-                                         "affinity is now {:#x}", actual);
-                        else
-                            spdlog::error("InjectWDASetAffinity: cross-arch affinity mismatch: "
-                                          "expected {:#x}, got {:#x}", affinity, actual);
-                    }
+                DWORD actual = 0xFFFFFFFF;
+                if (GetWindowDisplayAffinityW_Safe(hwnd, &actual)) {
+                    success = (actual == affinity);
+                    if (success)
+                        spdlog::info("InjectWDASetAffinity: verified (cross-arch) – "
+                                     "affinity is now {:#x}", actual);
+                    else
+                        spdlog::error("InjectWDASetAffinity: cross-arch affinity mismatch: "
+                                      "expected {:#x}, got {:#x}", affinity, actual);
                 }
 
                 // Auto-unload: spawn launcher in unload-only mode so the DLL
@@ -416,30 +420,22 @@ bool InjectWDASetAffinity(HWND hwnd, DWORD affinity, bool autoUnload)
                           pid, exitCode);
 
             // --- 8. Verify affinity ------------------------------------------
-            typedef BOOL(WINAPI* PFN_GWDA)(HWND, DWORD*);
-            static PFN_GWDA pfnGetWDA = reinterpret_cast<PFN_GWDA>(
-                GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                               "GetWindowDisplayAffinity"));
-
-            if (pfnGetWDA) {
-                DWORD actual = 0xFFFFFFFF;
-                if (pfnGetWDA(hwnd, &actual)) {
-                    success = (actual == affinity);
-                    if (success)
-                        spdlog::info("InjectWDASetAffinity: verified – affinity is now {:#x}",
-                                     actual);
-                    else
-                        spdlog::error("InjectWDASetAffinity: affinity mismatch: "
-                                      "expected {:#x}, got {:#x} – "
-                                      "SetWindowDisplayAffinity may have failed inside target.",
-                                      affinity, actual);
-                } else {
-                    spdlog::warn("InjectWDASetAffinity: GetWindowDisplayAffinity failed "
-                                 "(error {}); assuming success.", GetLastError());
-                    success = true;
-                }
+            DWORD actual = 0xFFFFFFFF;
+            if (GetWindowDisplayAffinityW_Safe(hwnd, &actual)) {
+                success = (actual == affinity);
+                if (success)
+                    spdlog::info("InjectWDASetAffinity: verified – affinity is now {:#x}",
+                                 actual);
+                else
+                    spdlog::error("InjectWDASetAffinity: affinity mismatch: "
+                                  "expected {:#x}, got {:#x} – "
+                                  "SetWindowDisplayAffinity may have failed inside target.",
+                                  affinity, actual);
             } else {
-                success = true; // API not available; trust exit code
+                // GetWindowDisplayAffinity unavailable or call failed; trust the exit code.
+                spdlog::warn("InjectWDASetAffinity: GetWindowDisplayAffinity failed "
+                             "(error {}); assuming success.", GetLastError());
+                success = true;
             }
 
             // --- 9. Auto-unload the DLL if requested -------------------------

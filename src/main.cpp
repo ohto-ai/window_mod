@@ -209,6 +209,7 @@ static std::atomic<bool>         g_captureShowCursor{false};
 // Forward declarations
 // ============================================================================
 INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
+static void ShowPreviewControls(HWND hDlg, bool show);
 
 // ============================================================================
 // Injector worker thread
@@ -301,7 +302,7 @@ static void InjectorWorkerProc()
 
                 // Apply ExcludeFromCapture to each window of this process.
                 for (HWND hwnd : ctx.hwnds)
-                    InjectWDASetAffinity(hwnd, 0x00000011u, true);
+                    InjectWDASetAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE, true);
 
                 // Mark PID as processed so we don't re-inject on subsequent ticks.
                 {
@@ -466,11 +467,7 @@ static void LoadSettings(HWND hDlg)
             CheckDlgButton(hDlg, IDC_CHK_SHOW_PREVIEW,
                 g_showDesktopPreview ? BST_CHECKED : BST_UNCHECKED);
             // Show/hide preview-related controls to match the loaded state
-            int sw = g_showDesktopPreview ? SW_SHOW : SW_HIDE;
-            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_SUBTEXT), sw);
-            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_STATIC),  sw);
-            ShowWindow(GetDlgItem(hDlg, IDC_TAB_SCREENS),     sw);
-            ShowWindow(GetDlgItem(hDlg, IDC_CHK_SHOW_CURSOR), sw);
+            ShowPreviewControls(hDlg, g_showDesktopPreview);
         }
     }
 
@@ -778,6 +775,15 @@ static void ShowPlaceholder(HWND hDlg)
 }
 
 // Restore all regular controls (called when the app regains focus).
+static void ShowPreviewControls(HWND hDlg, bool show)
+{
+    int sw = show ? SW_SHOW : SW_HIDE;
+    ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_SUBTEXT), sw);
+    ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_STATIC),  sw);
+    ShowWindow(GetDlgItem(hDlg, IDC_TAB_SCREENS),     sw);
+    ShowWindow(GetDlgItem(hDlg, IDC_CHK_SHOW_CURSOR), sw);
+}
+
 static void HidePlaceholder(HWND hDlg)
 {
     ShowWindow(GetDlgItem(hDlg, IDC_PLACEHOLDER_LABEL), SW_HIDE);
@@ -785,12 +791,8 @@ static void HidePlaceholder(HWND hDlg)
         if (HWND h = GetDlgItem(hDlg, id))
             ShowWindow(h, SW_SHOW);
     // Re-hide preview-related controls if desktop preview is disabled
-    if (!g_showDesktopPreview) {
-        ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_SUBTEXT), SW_HIDE);
-        ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_STATIC),  SW_HIDE);
-        ShowWindow(GetDlgItem(hDlg, IDC_TAB_SCREENS),     SW_HIDE);
-        ShowWindow(GetDlgItem(hDlg, IDC_CHK_SHOW_CURSOR), SW_HIDE);
-    }
+    if (!g_showDesktopPreview)
+        ShowPreviewControls(hDlg, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,7 +1489,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                     {
                         bool shouldExclude = (newImg == STATE_IMAGE_CHECKED);
                         const WindowInfo& w = g_windows[pnm->iItem];
-                        DWORD affinity = shouldExclude ? 0x00000011u : 0x00000000u;
+                        DWORD affinity = shouldExclude ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE;
                         SetStatus(hDlg, L"Injecting \u2026");
                         if (InjectWDASetAffinity(w.hwnd, affinity, g_autoUnloadDll)) {
                             SetStatus(hDlg, shouldExclude
@@ -1636,7 +1638,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_CTX_EXCLUDE:
         {
             bool newExclude = !IsWindowExcludeFromCapture(wi.hwnd);
-            DWORD affinity = newExclude ? 0x00000011u : 0x00000000u;
+            DWORD affinity = newExclude ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE;
             SetStatus(hDlg, L"Injecting \u2026");
             if (InjectWDASetAffinity(wi.hwnd, affinity, g_autoUnloadDll)) {
                 // Sync the checkbox
@@ -1714,11 +1716,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             g_showDesktopPreview =
                 (IsDlgButtonChecked(hDlg, IDC_CHK_SHOW_PREVIEW) == BST_CHECKED);
             // Show or hide preview-related controls based on the new state
-            int sw = g_showDesktopPreview ? SW_SHOW : SW_HIDE;
-            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_SUBTEXT), sw);
-            ShowWindow(GetDlgItem(hDlg, IDC_PREVIEW_STATIC),  sw);
-            ShowWindow(GetDlgItem(hDlg, IDC_TAB_SCREENS),     sw);
-            ShowWindow(GetDlgItem(hDlg, IDC_CHK_SHOW_CURSOR), sw);
+            ShowPreviewControls(hDlg, g_showDesktopPreview);
             // Relayout so the window list expands/contracts accordingly
             {
                 RECT rc; GetClientRect(hDlg, &rc);

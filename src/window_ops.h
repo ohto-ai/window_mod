@@ -2,6 +2,13 @@
 
 #include <windows.h>
 
+#ifndef WDA_NONE
+#define WDA_NONE 0x00000000
+#endif
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
 /// Set or remove the TOPMOST flag on a window.
 bool SetWindowTopMost(HWND hwnd, bool topMost);
 
