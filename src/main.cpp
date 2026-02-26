@@ -1515,8 +1515,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                     if (pnm->uNewState & LVIS_SELECTED)
                         UpdateSelectedInfo(hDlg);
                 }
-
-
+            }
         }
         break;
     }
