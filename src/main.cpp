@@ -114,16 +114,21 @@ struct CaptureEvent {
 };
 
 // ============================================================================
-// Dark theme colours
+// Dark theme colours  (Catppuccin Mocha palette)
 // ============================================================================
-static const COLORREF CLR_BG        = RGB(0x1e, 0x1e, 0x2e);
-static const COLORREF CLR_TEXT      = RGB(0xe0, 0xe0, 0xe0);
-static const COLORREF CLR_SUBTEXT   = RGB(0x88, 0x88, 0xaa);
-static const COLORREF CLR_LIST_BG   = RGB(0x22, 0x22, 0x35);
-static const COLORREF CLR_BTN_BG    = RGB(0x31, 0x32, 0x4a);
-static const COLORREF CLR_BTN_PRESS = RGB(0x45, 0x47, 0x6b);
-static const COLORREF CLR_BTN_BORDER= RGB(0x58, 0x5b, 0x70);
-static const COLORREF CLR_BTN_FOCUS = RGB(0x89, 0xb4, 0xfa);
+static const COLORREF CLR_BG         = RGB(0x1e, 0x1e, 0x2e);  // base
+static const COLORREF CLR_TEXT       = RGB(0xcd, 0xd6, 0xf4);  // text
+static const COLORREF CLR_SUBTEXT    = RGB(0xa6, 0xad, 0xc8);  // subtext1
+static const COLORREF CLR_STATUS     = RGB(0x6c, 0x70, 0x86);  // overlay1 (dim)
+static const COLORREF CLR_LIST_BG    = RGB(0x18, 0x18, 0x25);  // mantle
+static const COLORREF CLR_BTN_BG     = RGB(0x31, 0x32, 0x44);  // surface0
+static const COLORREF CLR_BTN_PRESS  = RGB(0x45, 0x47, 0x5a);  // surface1
+static const COLORREF CLR_BTN_BORDER = RGB(0x58, 0x5b, 0x70);  // surface2
+static const COLORREF CLR_BTN_FOCUS  = RGB(0x89, 0xb4, 0xfa);  // blue
+static const COLORREF CLR_ACCENT     = RGB(0x89, 0xb4, 0xfa);  // blue (section headers)
+static const COLORREF CLR_HIDDEN_BG  = RGB(0x20, 0x1c, 0x2e);  // subtle tint for hidden rows
+static const COLORREF CLR_HIDDEN_FG  = RGB(0xf3, 0x8b, 0xa8);  // red (hidden column text)
+static const COLORREF CLR_SEP        = RGB(0x45, 0x47, 0x5a);  // surface1 (separator line)
 
 // Preview geometry constants
 static const int PREVIEW_H_MIN   = 80;   // minimum preview height in pixels
@@ -641,38 +646,21 @@ static void SendStopCaptureEvent()
 // ---------------------------------------------------------------------------
 // ListView column setup for the hidden-windows list (4 columns).
 
-static void InitListViewColumns(HWND hList)
-{
-    static const struct { const wchar_t* name; int cx; } cols[] = {
-        { L"Title",   200 },
-        { L"Process",  90 },
-        { L"PID",      50 },
-        { L"Handle",   80 },
-    };
-    LVCOLUMNW lvc = {};
-    lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-    for (int i = 0; i < 4; ++i) {
-        lvc.cx       = cols[i].cx;
-        lvc.pszText  = const_cast<LPWSTR>(cols[i].name);
-        lvc.iSubItem = i;
-        ListView_InsertColumn(hList, i, &lvc);
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Main window list: Title, Process, TopMost columns.
+// Main window list: Title, Process, TopMost, Hidden columns.
 // ExcludeCapture is represented by the LVS_EX_CHECKBOXES checkbox.
 
 static void InitMainListViewColumns(HWND hList)
 {
     static const struct { const wchar_t* name; int cx; } cols[] = {
-        { L"Title",   220 },
+        { L"Title",   200 },
         { L"Process",  90 },
         { L"TopMost",  60 },
+        { L"Hidden",   50 },
     };
     LVCOLUMNW lvc = {};
     lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         lvc.cx       = cols[i].cx;
         lvc.pszText  = const_cast<LPWSTR>(cols[i].name);
         lvc.iSubItem = i;
@@ -731,9 +719,13 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
         ListView_SetItemText(hList, i, 2,
             const_cast<LPWSTR>(IsWindowTopMost(w.hwnd) ? L"\u2713" : L""));
 
-        // ExcludeCapture state = checkbox state
+        // Hidden column
+        ListView_SetItemText(hList, i, 3,
+            const_cast<LPWSTR>(w.isHidden ? L"\u25cf" : L""));
+
+        // ExcludeCapture state = checkbox state (skip for hidden windows)
         ListView_SetCheckState(hList, i,
-            IsWindowExcludeFromCapture(w.hwnd) ? TRUE : FALSE);
+            (!w.isHidden && IsWindowExcludeFromCapture(w.hwnd)) ? TRUE : FALSE);
     }
     g_populatingList = false;
 
@@ -762,11 +754,11 @@ static void PopulateWindowList(HWND hDlg, bool preserveSelection = false)
 static const int s_allControls[] = {
     IDC_PREVIEW_LABEL, IDC_PREVIEW_SUBTEXT, IDC_PREVIEW_STATIC, IDC_TAB_SCREENS,
     IDC_CHK_SHOW_PREVIEW,
+    IDC_SEP_1,
     IDC_HIDE_APPS_LABEL, IDC_HIDE_APPS_SUB, IDC_WINDOW_LIST, IDC_SELECTED_INFO,
-    IDC_GRP_OPS, IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_UNLOAD_DLL, IDC_CHK_AUTO_UNLOAD,
+    IDC_CHK_AUTO_UNLOAD,
     IDC_GRP_WATCH, IDC_WATCH_EDIT, IDC_BTN_WATCH_ADD, IDC_BTN_WATCH_REMOVE, IDC_WATCH_LIST,
-    IDC_GRP_HIDDEN, IDC_HIDDEN_LIST,
-    IDC_BTN_SHOW, IDC_STATUS_TEXT, IDC_CHK_SHOW_CURSOR,
+    IDC_SEP_2, IDC_STATUS_TEXT, IDC_CHK_SHOW_CURSOR,
 };
 
 // Show a full-page ":)" placeholder when the app loses focus.
@@ -802,45 +794,21 @@ static void HidePlaceholder(HWND hDlg)
 }
 
 // ---------------------------------------------------------------------------
-// Sync the hidden-windows list.
-
-static void PopulateHiddenList(HWND hDlg)
-{
-    HWND hList = GetDlgItem(hDlg, IDC_HIDDEN_LIST);
-    ListView_DeleteAllItems(hList);
-
-    LVITEMW lvi = {};
-    lvi.mask = LVIF_TEXT | LVIF_PARAM;
-
-    for (int i = 0; i < static_cast<int>(g_hiddenWindows.size()); ++i) {
-        const auto& w = g_hiddenWindows[i];
-
-        lvi.iItem    = i;
-        lvi.iSubItem = 0;
-        lvi.lParam   = static_cast<LPARAM>(i);
-        lvi.pszText  = const_cast<LPWSTR>(w.title.c_str());
-        ListView_InsertItem(hList, &lvi);
-
-        ListView_SetItemText(hList, i, 1,
-            const_cast<LPWSTR>(w.processName.c_str()));
-
-        auto pidStr = std::to_wstring(w.pid);
-        ListView_SetItemText(hList, i, 2,
-            const_cast<LPWSTR>(pidStr.c_str()));
-
-        auto hndStr = FmtHandle(w.hwnd);
-        ListView_SetItemText(hList, i, 3,
-            const_cast<LPWSTR>(hndStr.c_str()));
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Restore every window currently in the hidden list (called on exit).
 
 static void RestoreAllHiddenWindows()
 {
+    for (auto& w : g_windows) {
+        if (w.isHidden && IsWindow(w.hwnd))
+            ShowWindowRestore(w.hwnd);
+    }
+    // Also restore any tracked in g_hiddenWindows that may not be in g_windows
+    // (e.g. if the app never got a focus-in after hiding)
     for (auto& w : g_hiddenWindows) {
-        if (IsWindow(w.hwnd))
+        bool alreadyRestored = false;
+        for (const auto& gw : g_windows)
+            if (gw.hwnd == w.hwnd) { alreadyRestored = true; break; }
+        if (!alreadyRestored && IsWindow(w.hwnd))
             ShowWindowRestore(w.hwnd);
     }
     g_hiddenWindows.clear();
@@ -926,27 +894,19 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     int listW = W - 2 * mX;
 
     // --- Bottom zone (computed bottom-up) ---
-    const int statusH  = 16;
-    const int hidBtnH  = btnH;
-    const int hidListH = 65;
-    const int hidLblH  = lblH;
-    // Operations group: two rows – top row has 3 buttons, bottom row has the
-    // auto-unload checkbox.  Use 14 px top-padding (same as the Watch group)
-    // so that the group-box title text is never covered by the buttons.
-    const int opsH     = 14 + btnH + 4 + 14 + 8;  // title space + button row + gap + checkbox row + padding
-    // Watch group: edit+buttons row + list.
-    const int watchListH = 45;
+    const int statusH    = 16;
+    // Watch group: edit+buttons row + list (list height is 20% of window height, min 80).
+    const int watchListH = std::max(80, H * 20 / 100);
     const int watchGrpH  = 14 + btnH + 4 + watchListH + 8;
+    // Auto-unload DLL checkbox sits between the window list and the watch group
+    const int autoUnloadH = lblH;
 
     int y = H - mY;
 
-    int statusY  = y - statusH;   y = statusY  - DY;
-    int hidBtnY  = y - hidBtnH;   y = hidBtnY  - DY;
-    int hidListY = y - hidListH;  y = hidListY - DY;
-    int hidLblY  = y - hidLblH;   y = hidLblY  - DY;
-    int watchY   = y - watchGrpH; y = watchY   - DY;
-    int opsY     = y - opsH;      y = opsY     - DY;
-    int selInfoY = y - lblH;      y = selInfoY - DY;
+    int statusY     = y - statusH;     y = statusY     - DY;
+    int watchY      = y - watchGrpH;   y = watchY      - DY;
+    int autoUnloadY = y - autoUnloadH; y = autoUnloadY - DY;
+    int selInfoY    = y - lblH;        y = selInfoY    - DY;
 
     // --- Top zone (computed top-down) ---
     int top = mY;
@@ -997,19 +957,8 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     // Selected info label
     Move(IDC_SELECTED_INFO, mX, selInfoY, listW, lblH);
 
-    // Operations group + buttons
-    if (HWND hGrp = GetDlgItem(hDlg, IDC_GRP_OPS))
-        MoveWindow(hGrp, mX, opsY, listW, opsH, FALSE);
-    {
-        const int bx  = mX + 8;
-        const int by  = opsY + 14;  // start below the group-box title
-        const int bw  = (listW - 16 - 8) / 3;  // three equal-width buttons
-        Move(IDC_BTN_HIDE,       bx,           by, bw,   btnH);
-        Move(IDC_BTN_TOPMOST,    bx + bw + 4,  by, bw,   btnH);
-        Move(IDC_BTN_UNLOAD_DLL, bx + (bw+4)*2, by, bw,  btnH);
-        // Auto-unload checkbox below the buttons
-        Move(IDC_CHK_AUTO_UNLOAD, bx, by + btnH + 4, listW - 16, 14);
-    }
+    // Auto-unload DLL checkbox (between window list and watch group)
+    Move(IDC_CHK_AUTO_UNLOAD, mX, autoUnloadY, listW, autoUnloadH);
 
     // Process watch section
     if (HWND hGrp = GetDlgItem(hDlg, IDC_GRP_WATCH))
@@ -1032,26 +981,20 @@ static void OnSize(HWND hDlg, int /*cx*/, int /*cy*/)
     }
 
     // Stretch the Title column of the main window list to fill available width
+    // Columns: Title (dynamic) | Process (90) | TopMost (60) | Hidden (50)
     if (HWND hWinList = GetDlgItem(hDlg, IDC_WINDOW_LIST)) {
         int scrollW = GetSystemMetrics(SM_CXVSCROLL);
-        int titleW  = listW - 90 - 60 - scrollW - 4;
+        int titleW  = listW - 90 - 60 - 50 - scrollW - 4;
         if (titleW > 40) ListView_SetColumnWidth(hWinList, 0, titleW);
     }
 
-    // Stretch the Title column of the hidden windows list to fill available width
-    if (HWND hHidList = GetDlgItem(hDlg, IDC_HIDDEN_LIST)) {
-        int scrollW = GetSystemMetrics(SM_CXVSCROLL);
-        int titleW  = listW - 90 - 50 - 80 - scrollW - 4;
-        if (titleW > 40) ListView_SetColumnWidth(hHidList, 0, titleW);
-    }
-
-    // Hidden windows section
-    Move(IDC_GRP_HIDDEN,  mX, hidLblY,  listW, hidLblH + 2);
-    Move(IDC_HIDDEN_LIST, mX, hidListY, listW, hidListH);
-    Move(IDC_BTN_SHOW,    mX, hidBtnY,  110,   hidBtnH);
-
     // Status bar
     Move(IDC_STATUS_TEXT, mX, statusY, listW, statusH);
+
+    // SEP_1: thin line between preview and window section
+    Move(IDC_SEP_1, mX, hideAppY - 3, listW, 1);
+    // SEP_2: thin line above status bar
+    Move(IDC_SEP_2, mX, statusY - 3, listW, 1);
 
     // Placeholder: always fill the entire client area (it is hidden when focused).
     if (HWND hPh = GetDlgItem(hDlg, IDC_PLACEHOLDER_LABEL))
@@ -1144,18 +1087,6 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             SetWindowTheme(hList, L"DarkMode_Explorer", nullptr);
         }
 
-        // Init hidden list view
-        {
-            HWND hList = GetDlgItem(hDlg, IDC_HIDDEN_LIST);
-            InitListViewColumns(hList);
-            ListView_SetExtendedListViewStyle(hList,
-                LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-            ListView_SetBkColor(hList, CLR_LIST_BG);
-            ListView_SetTextBkColor(hList, CLR_LIST_BG);
-            ListView_SetTextColor(hList, CLR_TEXT);
-            SetWindowTheme(hList, L"DarkMode_Explorer", nullptr);
-        }
-
         // Enumerate monitors and populate tabs
         EnumerateMonitors();
         {
@@ -1173,9 +1104,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         // Apply owner-draw style to buttons for flat dark appearance
-        for (int btnId : {IDC_BTN_HIDE, IDC_BTN_TOPMOST, IDC_BTN_UNLOAD_DLL, IDC_BTN_SHOW,
-                          IDC_BTN_WATCH_ADD, IDC_BTN_WATCH_REMOVE}) {
+        for (int btnId : {IDC_BTN_WATCH_ADD, IDC_BTN_WATCH_REMOVE}) {
             HWND hBtn = GetDlgItem(hDlg, btnId);
+            if (!hBtn) continue;
             LONG_PTR style = GetWindowLongPtrW(hBtn, GWL_STYLE);
             style = (style & ~static_cast<LONG_PTR>(BS_TYPEMASK))
                   | static_cast<LONG_PTR>(BS_OWNERDRAW);
@@ -1183,6 +1114,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         // Init process watch list view (single "Process" column)
+        // LVS_EX_NOHORIZONTALSCROLL prevents the horizontal scrollbar from appearing.
         {
             HWND hList = GetDlgItem(hDlg, IDC_WATCH_LIST);
             LVCOLUMNW lvc = {};
@@ -1190,7 +1122,9 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             lvc.cx      = 300;
             lvc.pszText = const_cast<LPWSTR>(L"Process (exe name)");
             ListView_InsertColumn(hList, 0, &lvc);
-            ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            static const DWORD LVS_EX_NOHORIZONTALSCROLL = 0x04000000;
+            ListView_SetExtendedListViewStyle(hList,
+                LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_NOHORIZONTALSCROLL);
             ListView_SetBkColor(hList, CLR_LIST_BG);
             ListView_SetTextBkColor(hList, CLR_LIST_BG);
             ListView_SetTextColor(hList, CLR_TEXT);
@@ -1314,6 +1248,16 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
             return TRUE;
         }
 
+        // ---- Thin section-separator lines ---------------------------------
+        if (di->CtlType == ODT_STATIC &&
+            (di->CtlID == IDC_SEP_1 || di->CtlID == IDC_SEP_2))
+        {
+            HBRUSH hBr = CreateSolidBrush(CLR_SEP);
+            FillRect(di->hDC, &di->rcItem, hBr);
+            DeleteObject(hBr);
+            return TRUE;
+        }
+
         // ---- Screen preview static control ----------------------------------
         if (di->CtlType == ODT_STATIC && di->CtlID == IDC_PREVIEW_STATIC) {
             HDC  hDC = di->hDC;
@@ -1396,11 +1340,15 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         HWND hCtrl = reinterpret_cast<HWND>(lParam);
         SetBkMode(hDC, TRANSPARENT);
         int ctlId = GetDlgCtrlID(hCtrl);
-        if (ctlId == IDC_PREVIEW_SUBTEXT ||
-            ctlId == IDC_HIDE_APPS_SUB  ||
-            ctlId == IDC_STATUS_TEXT)
-        {
+        if (ctlId == IDC_PREVIEW_LABEL || ctlId == IDC_HIDE_APPS_LABEL) {
+            // Section headers: accent blue
+            SetTextColor(hDC, CLR_ACCENT);
+        } else if (ctlId == IDC_PREVIEW_SUBTEXT || ctlId == IDC_HIDE_APPS_SUB) {
+            // Subtitle labels: subtext1
             SetTextColor(hDC, CLR_SUBTEXT);
+        } else if (ctlId == IDC_STATUS_TEXT || ctlId == IDC_SELECTED_INFO) {
+            // Status / info: overlay1 (dimmer)
+            SetTextColor(hDC, CLR_STATUS);
         } else {
             SetTextColor(hDC, CLR_TEXT);
         }
@@ -1489,6 +1437,41 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
         // Main window list notifications
         if (pNMHDR->idFrom == IDC_WINDOW_LIST) {
 
+            // NM_CUSTOMDRAW: tint hidden rows (dimmed text + subtle bg + accent Hidden col)
+            if (pNMHDR->code == NM_CUSTOMDRAW) {
+                auto* pnmcd = reinterpret_cast<LPNMLVCUSTOMDRAW>(lParam);
+                DWORD stage = pnmcd->nmcd.dwDrawStage;
+                LRESULT ret = CDRF_DODEFAULT;
+
+                if (stage == CDDS_PREPAINT) {
+                    ret = CDRF_NOTIFYITEMDRAW;
+                } else if (stage == CDDS_ITEMPREPAINT) {
+                    int idx = static_cast<int>(pnmcd->nmcd.dwItemSpec);
+                    if (idx >= 0 && idx < static_cast<int>(g_windows.size())
+                        && g_windows[idx].isHidden)
+                    {
+                        bool sel = (pnmcd->nmcd.uItemState & CDIS_SELECTED) != 0;
+                        pnmcd->clrTextBk = CLR_HIDDEN_BG;
+                        if (!sel) {
+                            pnmcd->clrText = CLR_SUBTEXT;
+                            ret = CDRF_NOTIFYSUBITEMDRAW | CDRF_NEWFONT;
+                        }
+                    }
+                } else if ((stage & CDDS_SUBITEM) && (stage & CDDS_ITEMPREPAINT)) {
+                    int idx = static_cast<int>(pnmcd->nmcd.dwItemSpec);
+                    if (idx >= 0 && idx < static_cast<int>(g_windows.size())
+                        && g_windows[idx].isHidden)
+                    {
+                        pnmcd->clrTextBk = CLR_HIDDEN_BG;
+                        pnmcd->clrText   = (pnmcd->iSubItem == 3)
+                                            ? CLR_HIDDEN_FG : CLR_SUBTEXT;
+                        ret = CDRF_NEWFONT;
+                    }
+                }
+                SetWindowLongPtrW(hDlg, DWLP_MSGRESULT, ret);
+                return TRUE;
+            }
+
             if (pNMHDR->code == LVN_ITEMCHANGED && !g_populatingList) {
                 auto* pnm = reinterpret_cast<LPNMLISTVIEW>(lParam);
                 if (pnm->uChanged & LVIF_STATE) {
@@ -1532,30 +1515,185 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                     if (pnm->uNewState & LVIS_SELECTED)
                         UpdateSelectedInfo(hDlg);
                 }
-
-            } else if (pNMHDR->code == NM_CLICK) {
-                // Click on TopMost column (col 2) toggles TopMost inline
-                auto* pIA = reinterpret_cast<NMITEMACTIVATE*>(lParam);
-                if (pIA->iItem >= 0 &&
-                    pIA->iItem < static_cast<int>(g_windows.size()) &&
-                    pIA->iSubItem == 2)
-                {
-                    const WindowInfo& w = g_windows[pIA->iItem];
-                    bool newState = !IsWindowTopMost(w.hwnd);
-                    HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-                    if (SetWindowTopMost(w.hwnd, newState)) {
-                        g_populatingList = true;
-                        ListView_SetItemText(hList, pIA->iItem, 2,
-                            const_cast<LPWSTR>(newState ? L"\u2713" : L""));
-                        g_populatingList = false;
-                        SetStatus(hDlg, newState
-                            ? L"Set TOPMOST: \""    + w.title + L"\""
-                            : L"Removed TOPMOST: \"" + w.title + L"\"");
-                    }
-                }
             }
         }
         break;
+    }
+
+    // --------------------------------------------------------------------
+    // Right-click context menu on the window list
+    case WM_CONTEXTMENU:
+    {
+        HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
+        if (reinterpret_cast<HWND>(wParam) != hList) break;
+
+        int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+        if (sel < 0 || sel >= static_cast<int>(g_windows.size())) break;
+
+        const WindowInfo& w = g_windows[sel];
+        bool isHid     = w.isHidden;
+        bool isTopMost = !isHid && IsWindowTopMost(w.hwnd);
+        bool isExclude = !isHid && IsWindowExcludeFromCapture(w.hwnd);
+
+        HMENU hMenu = CreatePopupMenu();
+        if (isHid) {
+            AppendMenuW(hMenu, MF_STRING, IDM_CTX_SHOW_WINDOW,   L"Show");
+        } else {
+            AppendMenuW(hMenu, MF_STRING, IDM_CTX_HIDE_WINDOW,   L"Hide");
+        }
+        AppendMenuW(hMenu, MF_STRING | (isTopMost ? MF_CHECKED : 0),
+                    IDM_CTX_TOPMOST, L"TopMost");
+        AppendMenuW(hMenu, MF_STRING | (isExclude ? MF_CHECKED : 0),
+                    IDM_CTX_EXCLUDE, L"Exclude from capture");
+        AppendMenuW(hMenu, MF_STRING, IDM_CTX_WATCH,             L"Watch");
+        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hMenu, MF_STRING, IDM_CTX_UNLOAD_DLL,        L"Unload DLL");
+
+        POINT pt;
+        GetCursorPos(&pt);
+        SetForegroundWindow(hDlg);
+        int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                 pt.x, pt.y, 0, hDlg, nullptr);
+        DestroyMenu(hMenu);
+
+        // Re-fetch since the selection may have changed
+        if (sel < 0 || sel >= static_cast<int>(g_windows.size())) break;
+        WindowInfo& wi = g_windows[sel];
+
+        switch (cmd)
+        {
+        case IDM_CTX_HIDE_WINDOW:
+        {
+            // Check not already hidden
+            for (const auto& h : g_hiddenWindows)
+                if (h.hwnd == wi.hwnd) goto done_ctx_hide;
+            if (HideWindow(wi.hwnd)) {
+                wi.isHidden = true;
+                g_hiddenWindows.push_back(wi);
+                // Update the hidden column in place (no full re-enumeration)
+                g_populatingList = true;
+                ListView_SetItemText(hList, sel, 3,
+                    const_cast<LPWSTR>(L"\u25cf"));
+                // Clear checkbox for hidden windows
+                ListView_SetCheckState(hList, sel, FALSE);
+                g_populatingList = false;
+                SetStatus(hDlg, L"Hidden: \"" + wi.title + L"\"");
+            } else {
+                SetStatus(hDlg, L"Failed to hide window.");
+            }
+        done_ctx_hide:;
+            break;
+        }
+
+        case IDM_CTX_SHOW_WINDOW:
+        {
+            if (!IsWindow(wi.hwnd)) {
+                SetStatus(hDlg, L"Window no longer exists.");
+                // Remove from hidden list
+                wi.isHidden = false;
+                g_hiddenWindows.erase(
+                    std::remove_if(g_hiddenWindows.begin(), g_hiddenWindows.end(),
+                        [&wi](const WindowInfo& h){ return h.hwnd == wi.hwnd; }),
+                    g_hiddenWindows.end());
+                ListView_SetItemText(hList, sel, 3, const_cast<LPWSTR>(L""));
+                break;
+            }
+            if (ShowWindowRestore(wi.hwnd)) {
+                wi.isHidden = false;
+                g_hiddenWindows.erase(
+                    std::remove_if(g_hiddenWindows.begin(), g_hiddenWindows.end(),
+                        [&wi](const WindowInfo& h){ return h.hwnd == wi.hwnd; }),
+                    g_hiddenWindows.end());
+                g_populatingList = true;
+                ListView_SetItemText(hList, sel, 3, const_cast<LPWSTR>(L""));
+                // Restore TopMost column
+                ListView_SetItemText(hList, sel, 2,
+                    const_cast<LPWSTR>(IsWindowTopMost(wi.hwnd) ? L"\u2713" : L""));
+                g_populatingList = false;
+                SetStatus(hDlg, L"Restored: \"" + wi.title + L"\"");
+                UpdateSelectedInfo(hDlg);
+            } else {
+                SetStatus(hDlg, L"Failed to show window.");
+            }
+            break;
+        }
+
+        case IDM_CTX_TOPMOST:
+        {
+            bool newState = !IsWindowTopMost(wi.hwnd);
+            if (SetWindowTopMost(wi.hwnd, newState)) {
+                g_populatingList = true;
+                ListView_SetItemText(hList, sel, 2,
+                    const_cast<LPWSTR>(newState ? L"\u2713" : L""));
+                g_populatingList = false;
+                SetStatus(hDlg, newState
+                    ? L"Set TOPMOST: \""     + wi.title + L"\""
+                    : L"Removed TOPMOST: \"" + wi.title + L"\"");
+            }
+            break;
+        }
+
+        case IDM_CTX_EXCLUDE:
+        {
+            bool newExclude = !IsWindowExcludeFromCapture(wi.hwnd);
+            DWORD affinity = newExclude ? 0x00000011u : 0x00000000u;
+            SetStatus(hDlg, L"Injecting \u2026");
+            if (InjectWDASetAffinity(wi.hwnd, affinity, g_autoUnloadDll)) {
+                // Sync the checkbox
+                g_populatingList = true;
+                ListView_SetCheckState(hList, sel, newExclude ? TRUE : FALSE);
+                g_populatingList = false;
+                SetStatus(hDlg, newExclude
+                    ? L"ExcludeCapture enabled: \""  + wi.title + L"\""
+                    : L"ExcludeCapture disabled: \"" + wi.title + L"\"");
+            } else {
+                SetStatus(hDlg, L"Injection failed (error "
+                          + std::to_wstring(GetLastError()) + L").");
+            }
+            break;
+        }
+
+        case IDM_CTX_WATCH:
+        {
+            std::wstring name = wi.processName;
+            if (name.empty()) { SetStatus(hDlg, L"No process name available."); break; }
+            {
+                std::lock_guard<std::mutex> lk(g_watchedExeMutex);
+                for (const auto& e : g_watchedExeNames)
+                    if (_wcsicmp(e.c_str(), name.c_str()) == 0) {
+                        SetStatus(hDlg, L"Already watching: " + name);
+                        goto done_ctx_watch;
+                    }
+                g_watchedExeNames.push_back(name);
+            }
+            {
+                HWND hWatchList = GetDlgItem(hDlg, IDC_WATCH_LIST);
+                LVITEMW lvi = {};
+                lvi.mask    = LVIF_TEXT;
+                lvi.iItem   = ListView_GetItemCount(hWatchList);
+                lvi.pszText = const_cast<LPWSTR>(name.c_str());
+                ListView_InsertItem(hWatchList, &lvi);
+            }
+            SetStatus(hDlg, L"Watching: " + name);
+            SaveSettings();
+        done_ctx_watch:;
+            break;
+        }
+
+        case IDM_CTX_UNLOAD_DLL:
+        {
+            SetStatus(hDlg, L"Unloading DLL \u2026");
+            if (UnloadInjectedDll(wi.hwnd)) {
+                SetStatus(hDlg, L"DLL unloaded from: \"" + wi.title + L"\"");
+            } else {
+                SetStatus(hDlg, L"Unload failed (error "
+                          + std::to_wstring(GetLastError())
+                          + L"). Run as Administrator and check window_mod.log.");
+            }
+            break;
+        }
+        }
+        return TRUE;
     }
 
     // --------------------------------------------------------------------
@@ -1565,102 +1703,10 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 
         switch (id)
         {
-        case IDC_BTN_HIDE:
-        {
-            const WindowInfo* w = GetSelectedWindow(hDlg);
-            if (!w) { SetStatus(hDlg, L"No window selected."); break; }
-
-            for (auto& h : g_hiddenWindows)
-                if (h.hwnd == w->hwnd) {
-                    SetStatus(hDlg, L"Already in hidden list.");
-                    goto done_hide;
-                }
-
-            if (HideWindow(w->hwnd)) {
-                g_hiddenWindows.push_back(*w);
-                PopulateHiddenList(hDlg);
-                // Immediate sync re-enumeration (user action, needs instant feedback).
-                g_windows = EnumerateWindows();
-                PopulateWindowList(hDlg);
-                UpdateSelectedInfo(hDlg);
-                SetStatus(hDlg, L"Hidden: \"" + w->title + L"\"");
-            } else {
-                SetStatus(hDlg, L"Failed to hide window.");
-            }
-        done_hide:;
-            break;
-        }
-
-        case IDC_BTN_TOPMOST:
-        {
-            const WindowInfo* w = GetSelectedWindow(hDlg);
-            if (!w) { SetStatus(hDlg, L"No window selected."); break; }
-            bool newState = !IsWindowTopMost(w->hwnd);
-            if (SetWindowTopMost(w->hwnd, newState)) {
-                HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-                int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-                if (sel >= 0) {
-                    g_populatingList = true;
-                    ListView_SetItemText(hList, sel, 2,
-                        const_cast<LPWSTR>(newState ? L"\u2713" : L""));
-                    g_populatingList = false;
-                }
-                SetStatus(hDlg, newState
-                    ? L"Set TOPMOST: \""    + w->title + L"\""
-                    : L"Removed TOPMOST: \"" + w->title + L"\"");
-            }
-            break;
-        }
-
-        case IDC_BTN_UNLOAD_DLL:
-        {
-            const WindowInfo* w = GetSelectedWindow(hDlg);
-            if (!w) { SetStatus(hDlg, L"No window selected."); break; }
-            SetStatus(hDlg, L"Unloading DLL \u2026");
-            if (UnloadInjectedDll(w->hwnd)) {
-                SetStatus(hDlg, L"DLL unloaded from: \"" + w->title + L"\"");
-            } else {
-                SetStatus(hDlg,
-                    L"Unload failed (error "
-                    + std::to_wstring(GetLastError())
-                    + L"). Run as Administrator and check window_mod.log.");
-            }
-            break;
-        }
-
         case IDC_CHK_AUTO_UNLOAD:
             g_autoUnloadDll =
                 (IsDlgButtonChecked(hDlg, IDC_CHK_AUTO_UNLOAD) == BST_CHECKED);
             break;
-
-        case IDC_BTN_SHOW:
-        {
-            HWND hList = GetDlgItem(hDlg, IDC_HIDDEN_LIST);
-            int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-            if (sel < 0 || sel >= static_cast<int>(g_hiddenWindows.size())) {
-                SetStatus(hDlg, L"No hidden window selected.");
-                break;
-            }
-            const WindowInfo& w = g_hiddenWindows[sel];
-            if (!IsWindow(w.hwnd)) {
-                SetStatus(hDlg, L"Window no longer exists.");
-                g_hiddenWindows.erase(g_hiddenWindows.begin() + sel);
-                PopulateHiddenList(hDlg);
-                break;
-            }
-            if (ShowWindowRestore(w.hwnd)) {
-                SetStatus(hDlg, L"Restored: \"" + w.title + L"\"");
-                g_hiddenWindows.erase(g_hiddenWindows.begin() + sel);
-                PopulateHiddenList(hDlg);
-                // Immediate sync re-enumeration (user action, needs instant feedback).
-                g_windows = EnumerateWindows();
-                PopulateWindowList(hDlg);
-                UpdateSelectedInfo(hDlg);
-            } else {
-                SetStatus(hDlg, L"Failed to show window.");
-            }
-            break;
-        }
 
         case IDC_CHK_SHOW_PREVIEW:
         {
@@ -1809,10 +1855,30 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     // Injector thread: window list ready – swap and refresh the ListView.
     case WM_APP_WINDOWS_READY:
     {
+        std::vector<WindowInfo> newWindows;
         {
             std::lock_guard<std::mutex> lk(g_pendingWindowsMutex);
-            g_windows = std::move(g_pendingWindows);
+            newWindows = std::move(g_pendingWindows);
         }
+        // Build set of enumerated HWNDs
+        std::set<HWND> enumSet;
+        for (const auto& w : newWindows) enumSet.insert(w.hwnd);
+
+        // Check if any hidden windows were shown by external means
+        // (they appear in the new enumeration → remove from g_hiddenWindows).
+        g_hiddenWindows.erase(
+            std::remove_if(g_hiddenWindows.begin(), g_hiddenWindows.end(),
+                [&enumSet](const WindowInfo& h){ return enumSet.count(h.hwnd) > 0; }),
+            g_hiddenWindows.end());
+
+        // Append hidden windows (not in enumeration) with isHidden=true
+        g_windows = std::move(newWindows);
+        for (const auto& h : g_hiddenWindows) {
+            WindowInfo hi = h;
+            hi.isHidden = true;
+            g_windows.push_back(hi);
+        }
+
         PopulateWindowList(hDlg);
         UpdateSelectedInfo(hDlg);
         return TRUE;

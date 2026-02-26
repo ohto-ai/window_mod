@@ -34,39 +34,33 @@ BEGIN
     // ---- Selected window info --------------------------------------------------
     LTEXT   "", IDC_SELECTED_INFO, 7, 256, 286, 8
 
-    // ---- Operations ------------------------------------------------------------
-    GROUPBOX "Operations", IDC_GRP_OPS, 7, 266, 286, 28
-    PUSHBUTTON "Hide Window",    IDC_BTN_HIDE,       14, 276,  82, 13
-    PUSHBUTTON "Toggle TopMost", IDC_BTN_TOPMOST,   100, 276,  82, 13
-    PUSHBUTTON "Unload DLL",     IDC_BTN_UNLOAD_DLL, 186, 276,  82, 13
-    AUTOCHECKBOX "Auto-unload DLL", IDC_CHK_AUTO_UNLOAD, 14, 290, 120, 12
+    // ---- Auto-unload DLL checkbox (below window list, above process watch) ----
+    AUTOCHECKBOX "Auto-unload DLL", IDC_CHK_AUTO_UNLOAD, 14, 266, 120, 12
 
     // ---- Process watch section ------------------------------------------------
-    GROUPBOX "Process Watch", IDC_GRP_WATCH, 7, 298, 286, 60
-    EDITTEXT  IDC_WATCH_EDIT,              14, 313, 195, 13, ES_AUTOHSCROLL
-    PUSHBUTTON "Add",    IDC_BTN_WATCH_ADD,    212, 313,  30, 13
-    PUSHBUTTON "Remove", IDC_BTN_WATCH_REMOVE, 245, 313,  41, 13
+    GROUPBOX "Process Watch", IDC_GRP_WATCH, 7, 282, 286, 60
+    EDITTEXT  IDC_WATCH_EDIT,              14, 297, 195, 13, ES_AUTOHSCROLL
+    PUSHBUTTON "Add",    IDC_BTN_WATCH_ADD,    212, 297,  30, 13
+    PUSHBUTTON "Remove", IDC_BTN_WATCH_REMOVE, 245, 297,  41, 13
     CONTROL "", IDC_WATCH_LIST, "SysListView32",
                 LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
                 WS_BORDER | WS_TABSTOP,
-                14, 330, 272, 23
-
-    // ---- Hidden windows list --------------------------------------------------
-    LTEXT   "Hidden Windows:", IDC_GRP_HIDDEN, 7, 368, 80, 8
-    CONTROL "", IDC_HIDDEN_LIST, "SysListView32",
-                LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
-                WS_BORDER | WS_TABSTOP,
-                7, 309, 286, 50
-    PUSHBUTTON "Show Selected", IDC_BTN_SHOW, 7, 363, 72, 13
+                14, 314, 272, 23
 
     // ---- Status bar -----------------------------------------------------------
-    LTEXT   "Ready", IDC_STATUS_TEXT, 7, 382, 286, 8
+    LTEXT   "Ready", IDC_STATUS_TEXT, 7, 366, 286, 8
 
     // ---- Cursor checkbox (positioned by OnSize, same row as preview label) ---
     AUTOCHECKBOX "Show cursor in preview", IDC_CHK_SHOW_CURSOR, 160, 7, 133, 12
 
     // ---- Show desktop preview checkbox (positioned by OnSize, same row as preview label) -
     AUTOCHECKBOX "Show desktop preview", IDC_CHK_SHOW_PREVIEW, 7, 135, 140, 12
+
+    // ---- Section separators (SS_OWNERDRAW, positioned by OnSize) ---------------
+    // IDC_SEP_1: between preview/window sections
+    // IDC_SEP_2: between watch section and status bar
+    CONTROL "", IDC_SEP_1, "Static", 0x0000000D, 7, 154, 286, 1
+    CONTROL "", IDC_SEP_2, "Static", 0x0000000D, 7, 376, 286, 1
 
     // ---- Full-page placeholder shown when the app loses focus -----------------
     // SS_CENTER|SS_CENTERIMAGE = 0x0201; starts hidden (no WS_VISIBLE)
