@@ -206,6 +206,29 @@ static HBITMAP                   g_pendingPreviewBmp = nullptr;
 static std::atomic<bool>         g_captureShowCursor{false};
 
 // ============================================================================
+// DPI awareness helper
+// ============================================================================
+
+// Runtime-load SetThreadDpiAwarenessContext (requires Windows 10 version 1607+).
+// Returns nullptr on older systems so callers can skip the call gracefully.
+typedef DPI_AWARENESS_CONTEXT (WINAPI* PFN_SetThreadDpiAwarenessContext)(DPI_AWARENESS_CONTEXT);
+static PFN_SetThreadDpiAwarenessContext GetSetThreadDpiAwarenessFn()
+{
+    static PFN_SetThreadDpiAwarenessContext pfn =
+        reinterpret_cast<PFN_SetThreadDpiAwarenessContext>(
+            GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                           "SetThreadDpiAwarenessContext"));
+    return pfn;
+}
+
+// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4; defined in
+// Windows 10 SDK 1703+.  Provide our own definition so the code compiles
+// against older SDKs while still using the value at runtime.
+#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((DPI_AWARENESS_CONTEXT)-4)
+#endif
+
+// ============================================================================
 // Forward declarations
 // ============================================================================
 INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -341,6 +364,15 @@ static void CaptureWorkerProc()
         int h = activeRect.bottom - activeRect.top;
         if (w <= 0 || h <= 0) return;
 
+        // Set per-monitor DPI awareness so GetDC(nullptr) and BitBlt use
+        // physical pixel coordinates.  These match the physical rects stored
+        // in g_monitors by EnumerateMonitors (which uses the same context),
+        // fixing partial-capture on monitors with a non-100% scale factor.
+        DPI_AWARENESS_CONTEXT prevCtx = nullptr;
+        auto pfnSetDpi = GetSetThreadDpiAwarenessFn();
+        if (pfnSetDpi)
+            prevCtx = pfnSetDpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
         HDC     hScreen = GetDC(nullptr);
         HDC     hMem    = CreateCompatibleDC(hScreen);
         HBITMAP hBmp    = CreateCompatibleBitmap(hScreen, w, h);
@@ -361,6 +393,9 @@ static void CaptureWorkerProc()
         SelectObject(hMem, old);
         DeleteDC(hMem);
         ReleaseDC(nullptr, hScreen);
+
+        if (pfnSetDpi)
+            pfnSetDpi(prevCtx);
 
         // Replace any unconsumed frame (bounded-1 behaviour).
         HBITMAP discarded = nullptr;
@@ -603,8 +638,21 @@ static BOOL CALLBACK MonitorEnumProc(HMONITOR, HDC, LPRECT lprc, LPARAM lParam)
 static void EnumerateMonitors()
 {
     g_monitors.clear();
+
+    // Use per-monitor DPI awareness so EnumDisplayMonitors returns physical
+    // pixel rectangles.  This ensures the stored rects match the coordinates
+    // used by GetDC(nullptr)+BitBlt inside CaptureWorkerProc.
+    DPI_AWARENESS_CONTEXT prevCtx = nullptr;
+    auto pfnSetDpi = GetSetThreadDpiAwarenessFn();
+    if (pfnSetDpi)
+        prevCtx = pfnSetDpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
     EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc,
                         reinterpret_cast<LPARAM>(&g_monitors));
+
+    if (pfnSetDpi)
+        pfnSetDpi(prevCtx);
+
     if (g_monitors.empty()) {
         RECT r = { 0, 0,
                    GetSystemMetrics(SM_CXSCREEN),

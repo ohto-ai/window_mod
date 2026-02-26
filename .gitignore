@@ -43,4 +43,5 @@ _codeql_detected_source_root
 
 # Build directories
 build/
+build_*/
 out/
