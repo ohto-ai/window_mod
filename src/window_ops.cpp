@@ -22,7 +22,6 @@ bool HideWindow(HWND hwnd)
 bool ShowWindowRestore(HWND hwnd)
 {
     ShowWindow(hwnd, SW_SHOW);
-    SetForegroundWindow(hwnd);
     return IsWindowVisible(hwnd) != FALSE;
 }
 
