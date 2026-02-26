@@ -1516,27 +1516,7 @@ INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
                         UpdateSelectedInfo(hDlg);
                 }
 
-            } else if (pNMHDR->code == NM_CLICK) {
-                // Click on TopMost column (col 2) toggles TopMost inline
-                auto* pIA = reinterpret_cast<NMITEMACTIVATE*>(lParam);
-                if (pIA->iItem >= 0 &&
-                    pIA->iItem < static_cast<int>(g_windows.size()) &&
-                    pIA->iSubItem == 2)
-                {
-                    const WindowInfo& w = g_windows[pIA->iItem];
-                    bool newState = !IsWindowTopMost(w.hwnd);
-                    HWND hList = GetDlgItem(hDlg, IDC_WINDOW_LIST);
-                    if (SetWindowTopMost(w.hwnd, newState)) {
-                        g_populatingList = true;
-                        ListView_SetItemText(hList, pIA->iItem, 2,
-                            const_cast<LPWSTR>(newState ? L"\u2713" : L""));
-                        g_populatingList = false;
-                        SetStatus(hDlg, newState
-                            ? L"Set TOPMOST: \""    + w.title + L"\""
-                            : L"Removed TOPMOST: \"" + w.title + L"\"");
-                    }
-                }
-            }
+
         }
         break;
     }
